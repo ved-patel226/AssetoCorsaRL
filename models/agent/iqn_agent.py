@@ -106,7 +106,9 @@ class IQN_Agent:
             device=device,
         ).to(device)
 
-        self.optimizer = optim.Adam(self.qnetwork_local.parameters(), lr=LR)
+        self.optimizer = optim.AdamW(
+            self.qnetwork_local.parameters(), lr=LR, weight_decay=1e-5
+        )
         print(self.qnetwork_local)
 
         # Replay memory
@@ -168,13 +170,11 @@ class IQN_Agent:
         ):  # select greedy action if random number is higher than epsilon or noisy network is used!
             state = np.array(state)
             if len(self.state_size) > 1:
-                state = (
-                    torch.from_numpy(state).float().to(self.device)
-                )  # .expand(self.K, self.state_size[0], self.state_size[1],self.state_size[2])
+                # image-like state: ensure a batch dimension for conv head
+                state = torch.from_numpy(state).float().unsqueeze(0).to(self.device)
             else:
-                state = (
-                    torch.from_numpy(state).float().to(self.device)
-                )  # .expand(self.K, self.state_size[0])
+                # vector state: add batch dimension
+                state = torch.from_numpy(state).float().unsqueeze(0).to(self.device)
             self.qnetwork_local.eval()
             with torch.no_grad():
                 action_values = self.qnetwork_local.get_qvalues(state)  # .mean(0)
