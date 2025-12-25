@@ -1,4 +1,3 @@
-/iqn_agent_final.pth
-
-__pycache__/
-/wandb
+/memory
+/models
+/runs
