@@ -183,6 +183,10 @@ class SAC(object):
         encoder = self.encoder_target if use_target else self.encoder
         return encoder(obs_batch)
 
+    def _encode_target(self, obs_batch: torch.Tensor) -> torch.Tensor:
+        """Encode using the target encoder (for stable value estimation)."""
+        return self._encode(obs_batch, use_target=True)
+
     def select_action(self, state, eval=False):
         # state: np.array (H, W, C) or (C, H, W)
         if not isinstance(state, torch.Tensor):
@@ -209,6 +213,54 @@ class SAC(object):
         else:
             _, _, actions = self.policy.sample(z)
         return actions.cpu().numpy()
+
+    def update_critic_only(self, batch, weights=None, idxs=None):
+        """Update only the critic network, keeping policy frozen."""
+        state_batch, action_batch, reward_batch, next_state_batch, mask_batch = batch
+
+        state_batch = torch.FloatTensor(state_batch).to(self.device)
+        next_state_batch = torch.FloatTensor(next_state_batch).to(self.device)
+        action_batch = torch.FloatTensor(action_batch).to(self.device)
+        reward_batch = torch.FloatTensor(reward_batch).to(self.device).unsqueeze(1)
+        mask_batch = torch.FloatTensor(mask_batch).to(self.device).unsqueeze(1)
+
+        if weights is not None:
+            weights = torch.FloatTensor(weights).to(self.device).unsqueeze(1)
+
+        with torch.no_grad():
+            z = self._encode(state_batch)
+            z_next = self._encode_target(next_state_batch)
+            next_state_action, next_state_log_pi, _ = self.policy.sample(z_next)
+            qf1_next_target, qf2_next_target = self.critic_target(
+                z_next, next_state_action
+            )
+            min_qf_next_target = (
+                torch.min(qf1_next_target, qf2_next_target)
+                - self.alpha * next_state_log_pi
+            )
+            next_q_value = reward_batch + mask_batch * self.gamma * min_qf_next_target
+
+        # Critic update
+        z = self._encode(state_batch)
+        qf1, qf2 = self.critic(z, action_batch)
+
+        if weights is not None:
+            qf1_loss = (weights * (qf1 - next_q_value).pow(2)).mean()
+            qf2_loss = (weights * (qf2 - next_q_value).pow(2)).mean()
+        else:
+            qf1_loss = F.mse_loss(qf1, next_q_value)
+            qf2_loss = F.mse_loss(qf2, next_q_value)
+
+        qf_loss = qf1_loss + qf2_loss
+
+        self.critic_optim.zero_grad()
+        qf_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=5.0)
+        self.critic_optim.step()
+
+        # Soft update target networks
+        soft_update(self.critic_target, self.critic, self.tau)
+        soft_update(self.encoder_target, self.encoder, self.tau)
 
     def update_parameters(
         self,

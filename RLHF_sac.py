@@ -421,10 +421,16 @@ class BehavioralCloning:
             lr=lr,
         )
 
-    def train_epoch(self) -> dict:
-        """Train for one epoch."""
+    def train_epoch(self, noise_std: float = 0.1, std_reg_weight: float = 0.1) -> dict:
+        """Train for one epoch with noise injection for robustness.
+
+        Args:
+            noise_std: Standard deviation of noise added to expert actions
+            std_reg_weight: Weight for regularizing policy std to be low
+        """
         total_loss = 0
         total_mse = 0
+        total_std_reg = 0
         num_batches = 0
 
         for states, expert_actions in self.dataloader:
@@ -434,13 +440,24 @@ class BehavioralCloning:
             # Encode states
             latent = self.agent._encode(states)
 
-            # Get MEAN predicted actions from policy (deterministic for BC)
-            _, _, pred_actions = self.agent.policy.sample(
-                latent
-            )  # Use mean (3rd output)
+            # Get policy outputs (mean and log_std)
+            mean, log_std = self.agent.policy.forward(latent)
+            pred_actions = torch.tanh(mean)  # Deterministic action
 
-            # BC loss: MSE between predicted and expert actions
-            loss = F.mse_loss(pred_actions, expert_actions)
+            # BC loss on clean expert actions
+            mse_loss = F.mse_loss(pred_actions, expert_actions)
+
+            # Also train with noisy expert actions for robustness
+            noise = torch.randn_like(expert_actions) * noise_std
+            noisy_expert_actions = torch.clamp(expert_actions + noise, -1.0, 1.0)
+            noisy_mse_loss = F.mse_loss(pred_actions, noisy_expert_actions)
+
+            # Regularize log_std to be low (encourage deterministic behavior)
+            # This ensures stochastic sampling stays close to the mean
+            std_reg_loss = (log_std.exp() ** 2).mean()
+
+            # Combined loss
+            loss = mse_loss + 0.5 * noisy_mse_loss + std_reg_weight * std_reg_loss
 
             self.bc_optimizer.zero_grad()
             loss.backward()
@@ -452,100 +469,59 @@ class BehavioralCloning:
             self.bc_optimizer.step()
 
             total_loss += loss.item()
-            total_mse += loss.item()
+            total_mse += mse_loss.item()
+            total_std_reg += std_reg_loss.item()
             num_batches += 1
 
         return {
             "bc_loss": total_loss / num_batches,
             "mse": total_mse / num_batches,
+            "std_reg": total_std_reg / num_batches,
         }
 
-    def pretrain_critic(self, num_epochs: int = 50, gamma: float = 0.99):
+    def pretrain_critic(self, num_epochs: int = 150, gamma: float = 0.99):
         """
-        Pretrain critic using TD-learning from demonstrations with actor's policy.
-        This helps the critic provide better Q-value estimates during RL fine-tuning.
+        Pretrain critic to assign high Q-values to the BC policy's actions.
+        Uses a fixed target based on similarity to expert actions (no bootstrapping).
         """
         print("\n" + "=" * 60)
         print("CRITIC PRETRAINING")
         print("=" * 60)
-        print(f"Training critic for {num_epochs} epochs using actor's policy\n")
-
-        # Build a dataset with (state, action, reward, next_state, mask) from demonstrations
-        critic_data = []
-        for demo in self.dataset.states, self.dataset.actions:
-            pass  # We need the full transitions, not just state-action pairs
-
-        # Rebuild transitions from original demonstrations
-        transitions = []
-        for demo in self.demonstrations:
-            for state, action, reward, next_state, mask in demo:
-                transitions.append((state, action, reward, next_state, mask))
-
-        # Convert to tensors
-        states = np.array([t[0] for t in transitions], dtype=np.float32)
-        actions = np.array([t[1] for t in transitions], dtype=np.float32)
-        rewards = np.array([t[2] for t in transitions], dtype=np.float32)
-        next_states = np.array([t[3] for t in transitions], dtype=np.float32)
-        masks = np.array([t[4] for t in transitions], dtype=np.float32)
-
-        num_samples = len(transitions)
+        print(f"Training critic for {num_epochs} epochs\n")
 
         for epoch in range(num_epochs):
             total_q_loss = 0
             num_batches = 0
 
-            # Shuffle indices each epoch
-            indices = np.random.permutation(num_samples)
-
-            for batch_start in range(0, num_samples, self.batch_size):
-                batch_indices = indices[batch_start : batch_start + self.batch_size]
-
-                batch_states = torch.FloatTensor(states[batch_indices]).to(
-                    self.agent.device
-                )
-                batch_actions = torch.FloatTensor(actions[batch_indices]).to(
-                    self.agent.device
-                )
-                batch_rewards = (
-                    torch.FloatTensor(rewards[batch_indices])
-                    .to(self.agent.device)
-                    .unsqueeze(1)
-                )
-                batch_next_states = torch.FloatTensor(next_states[batch_indices]).to(
-                    self.agent.device
-                )
-                batch_masks = (
-                    torch.FloatTensor(masks[batch_indices])
-                    .to(self.agent.device)
-                    .unsqueeze(1)
-                )
+            for states, expert_actions in self.dataloader:
+                states = states.to(self.agent.device)
+                expert_actions = expert_actions.to(self.agent.device)
 
                 with torch.no_grad():
                     # Encode states
-                    latent = self.agent._encode(batch_states)
-                    next_latent = self.agent._encode(batch_next_states)
+                    latent = self.agent._encode(states)
 
-                    # Get actor's action for next state
-                    next_action, next_log_pi, _ = self.agent.policy.sample(next_latent)
+                    # Get BC policy's actions (what the actor actually outputs)
+                    _, _, bc_actions = self.agent.policy.sample(latent)
 
-                    # Compute target Q-value using actor's policy
-                    q1_next, q2_next = self.agent.critic_target(
-                        next_latent, next_action
-                    )
-                    min_q_next = torch.min(q1_next, q2_next)
-
-                    # Include entropy term for SAC-style targets
-                    target_q = batch_rewards + batch_masks * gamma * (
-                        min_q_next - self.agent.alpha * next_log_pi
+                    # Fixed target: high Q if BC action matches expert, lower otherwise
+                    # This doesn't bootstrap from critic_target, so it's stable
+                    action_error = F.mse_loss(
+                        bc_actions, expert_actions, reduction="none"
+                    ).mean(dim=1, keepdim=True)
+                    # Target Q: 10.0 for perfect match, decreasing with error
+                    target_q = torch.clamp(
+                        10.0 - action_error * 20.0, min=0.0, max=10.0
                     )
 
-                # Get current Q-values for the demonstration actions
-                q1, q2 = self.agent.critic(latent.detach(), batch_actions)
+                # Compute Q-values for BC policy's actions
+                latent_grad = self.agent._encode(states)  # Need gradients for critic
+                q1, q2 = self.agent.critic(latent_grad.detach(), bc_actions)
 
                 # MSE loss for both Q-networks
                 q_loss = F.mse_loss(q1, target_q) + F.mse_loss(q2, target_q)
 
-                # Update critic only (not encoder)
+                # Update critic
                 self.agent.critic_optim.zero_grad()
                 q_loss.backward()
                 torch.nn.utils.clip_grad_norm_(
@@ -553,31 +529,26 @@ class BehavioralCloning:
                 )
                 self.agent.critic_optim.step()
 
-                # Soft update target network
-                from sac.utils import soft_update
-
-                soft_update(self.agent.critic_target, self.agent.critic, self.agent.tau)
-
                 total_q_loss += q_loss.item()
                 num_batches += 1
 
             if (epoch + 1) % 10 == 0 or epoch == 0:
-                print(
-                    f"Critic Epoch {epoch+1}/{num_epochs} - Q Loss: {total_q_loss/num_batches:.6f}"
-                )
+                avg_loss = total_q_loss / num_batches
+                print(f"Critic Epoch {epoch+1}/{num_epochs} - Q Loss: {avg_loss:.6f}")
 
-        # Hard update target critic after pretraining
+        # Sync target networks
         from sac.utils import hard_update
 
         hard_update(self.agent.critic_target, self.agent.critic)
-        print("Critic pretraining complete, target network synchronized\n")
+        hard_update(self.agent.encoder_target, self.agent.encoder)
+        print("Critic pretraining complete, target networks synchronized\n")
 
     def pretrain(
         self,
         num_epochs: int = 100,
         eval_interval: int = 10,
         save_best: bool = True,
-        pretrain_critic_epochs: int = 50,
+        pretrain_critic_epochs: int = 150,
     ) -> dict:
         """
         Pretrain the policy using behavioral cloning.
@@ -613,7 +584,9 @@ class BehavioralCloning:
             metrics = self.train_epoch()
             history["bc_loss"].append(metrics["bc_loss"])
 
-            print(f"Epoch {epoch+1}/{num_epochs} - BC Loss: {metrics['bc_loss']:.6f}")
+            print(
+                f"Epoch {epoch+1}/{num_epochs} - BC Loss: {metrics['bc_loss']:.6f}, MSE: {metrics['mse']:.6f}, Std: {metrics['std_reg']:.4f}"
+            )
 
             if (epoch + 1) % eval_interval == 0:
                 eval_reward = self._evaluate()
@@ -627,6 +600,18 @@ class BehavioralCloning:
 
         # Save final model
         self.agent.save_model("carracer", "bc_final")
+
+        # Diagnostic: show learned policy std
+        with torch.no_grad():
+            sample_states = torch.FloatTensor(self.dataset.states[:100]).to(
+                self.agent.device
+            )
+            latent = self.agent._encode(sample_states)
+            mean, log_std = self.agent.policy.forward(latent)
+            avg_std = log_std.exp().mean().item()
+            print(
+                f"\nPolicy avg std after training: {avg_std:.4f} (lower = more deterministic)"
+            )
 
         print(f"\n{'='*60}")
         print(f"Pretraining complete!")
@@ -660,7 +645,9 @@ class BehavioralCloning:
             episode_reward = 0
 
             while not done:
-                action = self.agent.select_action(state, eval=True)
+                action = self.agent.select_action(
+                    state, eval=False
+                )  # Use stochastic action
                 state, reward, terminated, truncated, _ = env.step(action)
                 done = terminated or truncated
                 episode_reward += reward

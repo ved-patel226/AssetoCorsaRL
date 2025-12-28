@@ -3,6 +3,8 @@ from pathlib import Path
 from getpass import getuser
 from datetime import datetime
 import warnings
+import time
+from functools import wraps
 
 import numpy as np
 import torch
@@ -22,6 +24,87 @@ from perception.generate_AE_data import generate_action
 
 
 torch.backends.cudnn.benchmark = True
+
+
+# ============== WANDB RESILIENT LOGGING ==============
+class WandbLogger:
+    """Resilient wandb logger that handles connection errors gracefully."""
+    
+    def __init__(self, max_retries: int = 3, retry_delay: float = 1.0):
+        self.max_retries = max_retries
+        self.retry_delay = retry_delay
+        self.is_connected = False
+        self._failed_logs = []  # Store failed logs for potential retry
+        self._connection_errors = 0
+        
+    def init(self, **kwargs):
+        """Initialize wandb with error handling."""
+        for attempt in range(self.max_retries):
+            try:
+                wandb.init(**kwargs)
+                self.is_connected = True
+                self._connection_errors = 0
+                return True
+            except Exception as e:
+                print(f"[WandbLogger] Init attempt {attempt + 1}/{self.max_retries} failed: {e}")
+                if attempt < self.max_retries - 1:
+                    time.sleep(self.retry_delay * (attempt + 1))
+        
+        print("[WandbLogger] Failed to initialize wandb. Continuing without logging.")
+        self.is_connected = False
+        return False
+    
+    def log(self, data: dict, step: int = None, commit: bool = True):
+        """Log metrics with automatic retry and error handling."""
+        if not self.is_connected:
+            return False
+            
+        for attempt in range(self.max_retries):
+            try:
+                wandb.log(data, step=step, commit=commit)
+                self._connection_errors = 0
+                return True
+            except (ConnectionResetError, BrokenPipeError, OSError) as e:
+                self._connection_errors += 1
+                if attempt < self.max_retries - 1:
+                    print(f"[WandbLogger] Connection error (attempt {attempt + 1}): {e}")
+                    time.sleep(self.retry_delay * (attempt + 1))
+                else:
+                    print(f"[WandbLogger] Failed to log after {self.max_retries} attempts. Data lost.")
+                    if self._connection_errors > 10:
+                        print("[WandbLogger] Too many connection errors. Disabling wandb logging.")
+                        self.is_connected = False
+            except Exception as e:
+                print(f"[WandbLogger] Unexpected error during log: {type(e).__name__}: {e}")
+                return False
+        return False
+    
+    def finish(self):
+        """Finish wandb run with error handling."""
+        if not self.is_connected:
+            return
+            
+        for attempt in range(self.max_retries):
+            try:
+                wandb.finish()
+                self.is_connected = False
+                return True
+            except (ConnectionResetError, BrokenPipeError, OSError) as e:
+                if attempt < self.max_retries - 1:
+                    print(f"[WandbLogger] Error finishing wandb (attempt {attempt + 1}): {e}")
+                    time.sleep(self.retry_delay)
+                else:
+                    print(f"[WandbLogger] Could not finish wandb cleanly: {e}")
+            except Exception as e:
+                print(f"[WandbLogger] Unexpected error during finish: {type(e).__name__}: {e}")
+                break
+        self.is_connected = False
+        return False
+
+
+# Global logger instance
+wandb_logger = WandbLogger(max_retries=3, retry_delay=1.0)
+# =====================================================
 # Enable TF32 for faster computation on Ampere+ GPUs
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -167,8 +250,8 @@ def train(
     )
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    # Initialize wandb
-    wandb.init(
+    # Initialize wandb with resilient logger
+    wandb_logger.init(
         project="AssetoCorsaRL",
         name=f"SAC_{date.month}_{date.day}_{date.hour}_{date.minute}_{getuser()}",
         config={
@@ -240,6 +323,9 @@ def train(
     episode_counts = np.zeros(num_envs, dtype=int)
     best_eval_reward = float("-inf")  # Track best evaluation reward for video logging
 
+    bc_warmup_steps = 100_000 if load_models else 0  # Collect data with BC policy first
+    policy_frozen = load_models  # Freeze policy updates during warmup
+
     while total_numsteps < num_steps:
         if total_numsteps < start_steps and not load_models:
             if accelerated_exploration:
@@ -254,10 +340,60 @@ def train(
                     [envs.single_action_space.sample() for _ in range(num_envs)]
                 )
         else:
-            actions = agent.select_action_batch(processed_states)
+            use_eval_mode = (
+                load_models and (total_numsteps - initial_step) < bc_warmup_steps
+            )
+            actions = agent.select_action_batch(processed_states, eval=use_eval_mode)
+
+        if policy_frozen and (total_numsteps - initial_step) >= bc_warmup_steps:
+            policy_frozen = False
+            print(f"\n{'='*60}")
+            print(f"BC WARMUP COMPLETE - Unfreezing policy updates")
+            print(f"Total steps: {total_numsteps}, Buffer size: {len(memory)}")
+            print(f"{'='*60}\n")
 
         if len(memory) > batch_size:
-            beta = beta_by_frame(total_numsteps) if use_per else None
+            if policy_frozen:
+                # Only update critic, not policy
+                beta = beta_by_frame(total_numsteps) if use_per else None
+
+                for _ in range(updates_per_step):
+                    if use_per:
+                        (
+                            batch_state,
+                            batch_action,
+                            batch_reward,
+                            batch_next_state,
+                            batch_done,
+                            batch_weight,
+                            batch_idx,
+                        ) = memory.sample(batch_size, beta)
+                    else:
+                        (
+                            batch_state,
+                            batch_action,
+                            batch_reward,
+                            batch_next_state,
+                            batch_done,
+                        ) = memory.sample(batch_size)
+                        batch_weight, batch_idx = None, None
+
+                    # Update ONLY critic during warmup
+                    agent.update_critic_only(
+                        batch=(
+                            batch_state,
+                            batch_action,
+                            batch_reward,
+                            batch_next_state,
+                            batch_done,
+                        ),
+                        weights=batch_weight,
+                        idxs=batch_idx,
+                    )
+                    updates += 1
+            else:
+                # Normal SAC updates (critic + policy)
+                beta = beta_by_frame(total_numsteps) if use_per else None
 
             metrics_accum = {
                 "loss/critic_1": 0,
@@ -349,7 +485,7 @@ def train(
                     * avg_metrics["policy/log_pi_mean"]
                 )
                 avg_metrics["policy/q_term"] = avg_metrics["policy/min_qf_pi_mean"]
-                wandb.log(avg_metrics, step=total_numsteps)
+                wandb_logger.log(avg_metrics, step=total_numsteps)
 
         # Step all envs (with auto_reset enabled, finished envs are auto-reset)
         next_states, rewards, terminated, truncated, infos = envs.step(actions)
@@ -387,7 +523,7 @@ def train(
 
             if d:
                 episode_counts[i] += 1
-                wandb.log(
+                wandb_logger.log(
                     {
                         f"reward/train_env_{i}": episode_rewards[i],
                         # f"reward/train_env_{i}_scaled": episode_rewards[i]
@@ -483,22 +619,25 @@ def train(
                     eval_env.close()
 
                     video_array = np.array(video_frames).transpose(0, 3, 1, 2)
-                    wandb.log(
-                        {
-                            "eval/video": wandb.Video(
-                                video_array, fps=30, format="mp4"
-                            ),
-                            "avg_reward/test": avg_reward,
-                            "avg_reward/best": best_eval_reward,
-                        },
-                        step=total_numsteps,
-                    )
+                    try:
+                        wandb_logger.log(
+                            {
+                                "eval/video": wandb.Video(
+                                    video_array, fps=30, format="mp4"
+                                ),
+                                "avg_reward/test": avg_reward,
+                                "avg_reward/best": best_eval_reward,
+                            },
+                            step=total_numsteps,
+                        )
+                    except Exception as e:
+                        print(f"[WandbLogger] Failed to log video: {e}")
 
                     # Save best model
                     if save_models:
                         agent.save_model("carracer", "best")
                 else:
-                    wandb.log(
+                    wandb_logger.log(
                         {
                             "avg_reward/test": avg_reward,
                             "avg_reward/best": best_eval_reward,
@@ -519,12 +658,12 @@ def train(
                     agent.save_model("carracer", "last")
 
     envs.close()
-    wandb.finish()
+    wandb_logger.finish()
 
 
 if __name__ == "__main__":
     train(
-        batch_size=512,  # Larger batch = better GPU utilization
+        batch_size=256,
         load_memory=False,
         eval_interval=50,
         load_models=True,
@@ -537,7 +676,7 @@ if __name__ == "__main__":
         log_interval=100,  # Log less frequently
         use_async_envs=True,  # Async envs for parallelism
         prefetch_batches=3,  # Prefetch data batches
-        path_to_buffer="memory\\demonstrations_talk2_6h7jpbd_12_27_14_34.pkl",
+        path_to_buffer="memory\\memory\\buffer_talk2_6h7jpbd_12_25_19.pkl",
         path_to_actor="models\\sac_actor_carracer_bc_best.pt",
         path_to_critic="models\\sac_critic_carracer_bc_best.pt",
         path_to_encoder="models\\sac_encoder_carracer_bc_best.pt",
