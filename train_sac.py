@@ -26,17 +26,15 @@ from perception.generate_AE_data import generate_action
 torch.backends.cudnn.benchmark = True
 
 
-# ============== WANDB RESILIENT LOGGING ==============
+# ============== WANDB RESILIENT LOGGING CUZ OF THAT STUPID ERROR ==============
 class WandbLogger:
-    """Resilient wandb logger that handles connection errors gracefully."""
-    
     def __init__(self, max_retries: int = 3, retry_delay: float = 1.0):
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.is_connected = False
-        self._failed_logs = []  # Store failed logs for potential retry
+        self._failed_logs = []  # store failed logs for potential retry
         self._connection_errors = 0
-        
+
     def init(self, **kwargs):
         """Initialize wandb with error handling."""
         for attempt in range(self.max_retries):
@@ -46,19 +44,21 @@ class WandbLogger:
                 self._connection_errors = 0
                 return True
             except Exception as e:
-                print(f"[WandbLogger] Init attempt {attempt + 1}/{self.max_retries} failed: {e}")
+                print(
+                    f"[WandbLogger] Init attempt {attempt + 1}/{self.max_retries} failed: {e}"
+                )
                 if attempt < self.max_retries - 1:
                     time.sleep(self.retry_delay * (attempt + 1))
-        
+
         print("[WandbLogger] Failed to initialize wandb. Continuing without logging.")
         self.is_connected = False
         return False
-    
+
     def log(self, data: dict, step: int = None, commit: bool = True):
         """Log metrics with automatic retry and error handling."""
         if not self.is_connected:
             return False
-            
+
         for attempt in range(self.max_retries):
             try:
                 wandb.log(data, step=step, commit=commit)
@@ -67,23 +67,31 @@ class WandbLogger:
             except (ConnectionResetError, BrokenPipeError, OSError) as e:
                 self._connection_errors += 1
                 if attempt < self.max_retries - 1:
-                    print(f"[WandbLogger] Connection error (attempt {attempt + 1}): {e}")
+                    print(
+                        f"[WandbLogger] Connection error (attempt {attempt + 1}): {e}"
+                    )
                     time.sleep(self.retry_delay * (attempt + 1))
                 else:
-                    print(f"[WandbLogger] Failed to log after {self.max_retries} attempts. Data lost.")
+                    print(
+                        f"[WandbLogger] Failed to log after {self.max_retries} attempts. Data lost."
+                    )
                     if self._connection_errors > 10:
-                        print("[WandbLogger] Too many connection errors. Disabling wandb logging.")
+                        print(
+                            "[WandbLogger] Too many connection errors. Disabling wandb logging."
+                        )
                         self.is_connected = False
             except Exception as e:
-                print(f"[WandbLogger] Unexpected error during log: {type(e).__name__}: {e}")
+                print(
+                    f"[WandbLogger] Unexpected error during log: {type(e).__name__}: {e}"
+                )
                 return False
         return False
-    
+
     def finish(self):
         """Finish wandb run with error handling."""
         if not self.is_connected:
             return
-            
+
         for attempt in range(self.max_retries):
             try:
                 wandb.finish()
@@ -91,21 +99,24 @@ class WandbLogger:
                 return True
             except (ConnectionResetError, BrokenPipeError, OSError) as e:
                 if attempt < self.max_retries - 1:
-                    print(f"[WandbLogger] Error finishing wandb (attempt {attempt + 1}): {e}")
+                    print(
+                        f"[WandbLogger] Error finishing wandb (attempt {attempt + 1}): {e}"
+                    )
                     time.sleep(self.retry_delay)
                 else:
                     print(f"[WandbLogger] Could not finish wandb cleanly: {e}")
             except Exception as e:
-                print(f"[WandbLogger] Unexpected error during finish: {type(e).__name__}: {e}")
+                print(
+                    f"[WandbLogger] Unexpected error during finish: {type(e).__name__}: {e}"
+                )
                 break
         self.is_connected = False
         return False
 
 
-# Global logger instance
 wandb_logger = WandbLogger(max_retries=3, retry_delay=1.0)
 # =====================================================
-# Enable TF32 for faster computation on Ampere+ GPUs
+# TF32 = faster sometimes
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -114,9 +125,9 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def train(
     seed: int = 69,
-    batch_size: int = 512,  # Larger batch for better GPU utilization
+    batch_size: int = 512,
     num_steps: int = 5_000_000,
-    updates_per_step: int = 2,  # More updates per env step
+    updates_per_step: int = 2,
     start_steps: int = 30_000,
     replay_size: int = 5_000_000,
     eval: bool = True,
@@ -130,16 +141,16 @@ def train(
     path_to_critic: str = "./models/sac_critic_carracer_klein_6_24_18.pt",
     path_to_encoder: str = "./models/sac_encoder_carracer_klein_6_24_18.pt",
     path_to_buffer: str = "./memory/buffer_talk2_6h7jpbd_12_25_15.pkl",
-    num_envs: int = 8,  # More parallel envs
+    num_envs: int = 8,
     use_per: bool = True,
     per_alpha: float = 0.6,
     per_beta_start: float = 0.4,
     per_beta_frames: int = 1_000_000,
     per_eps: float = 1e-6,
     initial_step: int = 0,
-    log_interval: int = 100,  # Log every N updates to reduce overhead
-    use_async_envs: bool = True,  # Use async vectorized envs for parallelism
-    prefetch_batches: int = 3,  # Number of batches to prefetch
+    log_interval: int = 100,
+    use_async_envs: bool = True,
+    prefetch_batches: int = 3,
 ):
     """
     ## The train function consist of:
@@ -174,9 +185,7 @@ def train(
     def make_env_fn(rank):
         def _init():
             env_ = gym.make("CarRacing-v3")
-            # Convert to grayscale (96, 96)
             env_ = GrayscaleObservation(env_, keep_dim=False)
-            # Normalize pixel values to [0, 1] with proper observation space
             obs_space = env_.observation_space
             normalized_obs_space = gym.spaces.Box(
                 low=0.0,
@@ -189,13 +198,11 @@ def train(
                 lambda obs: (obs / 255.0).astype(np.float32),
                 normalized_obs_space,
             )
-            # Stack 3 frames -> (3, 96, 96)
             env_ = FrameStackObservation(env_, stack_size=3)
             return env_
 
         return _init
 
-    # Use AsyncVectorEnv for parallel environment stepping (much faster)
     if use_async_envs:
         envs = AsyncVectorEnv([make_env_fn(i) for i in range(num_envs)])
     else:
@@ -205,7 +212,8 @@ def train(
     np.random.seed(seed)
 
     # NOTE: ALWAYS CHECK PARAMETERS BEFORE TRAINING
-    # Frame stack of 3 grayscale frames -> in_channels=3
+    # frame stack of 3 grayscale frames -> in_channels=3
+    # TODO: change to 4 when u feel like it
     frame_stack_size = 3
     agent = SAC(
         envs.single_action_space,
@@ -233,24 +241,20 @@ def train(
     )
 
     if load_memory:
-        # load memory and deactivate random exploration
         memory.load(path_to_buffer)
 
     if load_memory or load_models:
         start_steps = 0
 
-    # Training Loop
     total_numsteps = initial_step
     updates = 0
 
-    # Log Settings and training results
     date = datetime.now()
     log_dir = Path(
         f"runs/{date.year}_SAC_{date.month}_{date.day}_{date.hour}_{date.minute}_{getuser()}/"
     )
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    # Initialize wandb with resilient logger
     wandb_logger.init(
         project="AssetoCorsaRL",
         name=f"SAC_{date.month}_{date.day}_{date.hour}_{date.minute}_{getuser()}",
@@ -293,7 +297,6 @@ def train(
     if load_models:
         try:
             agent.load_model(path_to_actor, path_to_critic, path_to_encoder)
-            # ADD THESE LINES - sync target networks
             from sac.utils import hard_update
 
             hard_update(agent.encoder_target, agent.encoder)
@@ -310,21 +313,17 @@ def train(
                 "Couldn't locate models in the specified paths. Training from scratch.",
                 RuntimeWarning,
             )
-    # Vectorized training loop
-    # Initialize vector env states
     states, _ = envs.reset(seed=[seed + i for i in range(num_envs)])
-    # Place cars at default starting positions for each env
 
-    # Process initial states (use raw observations; encoder is inside SAC)
     processed_states = states.copy()
 
     episode_rewards = np.zeros(num_envs)
     episode_steps = np.zeros(num_envs, dtype=int)
     episode_counts = np.zeros(num_envs, dtype=int)
-    best_eval_reward = float("-inf")  # Track best evaluation reward for video logging
+    best_eval_reward = float("-inf")
 
-    bc_warmup_steps = 100_000 if load_models else 0  # Collect data with BC policy first
-    policy_frozen = load_models  # Freeze policy updates during warmup
+    bc_warmup_steps = 100_000 if load_models else 0
+    policy_frozen = load_models
 
     while total_numsteps < num_steps:
         if total_numsteps < start_steps and not load_models:
@@ -354,7 +353,7 @@ def train(
 
         if len(memory) > batch_size:
             if policy_frozen:
-                # Only update critic, not policy
+                # update critic, not policy
                 beta = beta_by_frame(total_numsteps) if use_per else None
 
                 for _ in range(updates_per_step):
@@ -378,7 +377,7 @@ def train(
                         ) = memory.sample(batch_size)
                         batch_weight, batch_idx = None, None
 
-                    # Update ONLY critic during warmup
+                    # ONLY critic during warmup
                     agent.update_critic_only(
                         batch=(
                             batch_state,
@@ -392,7 +391,7 @@ def train(
                     )
                     updates += 1
             else:
-                # Normal SAC updates (critic + policy)
+                # critic + policy updates now
                 beta = beta_by_frame(total_numsteps) if use_per else None
 
             metrics_accum = {
@@ -459,7 +458,6 @@ def train(
                     idxs=batch_idx,
                 )
 
-                # Accumulate metrics
                 metrics_accum["loss/critic_1"] += critic_1_loss
                 metrics_accum["loss/critic_2"] += critic_2_loss
                 metrics_accum["loss/policy"] += policy_loss
@@ -475,7 +473,6 @@ def train(
 
                 updates += 1
 
-            # Log averaged metrics less frequently to reduce overhead
             if updates % log_interval == 0:
                 avg_metrics = {
                     k: v / updates_per_step for k, v in metrics_accum.items()
@@ -487,23 +484,21 @@ def train(
                 avg_metrics["policy/q_term"] = avg_metrics["policy/min_qf_pi_mean"]
                 wandb_logger.log(avg_metrics, step=total_numsteps)
 
-        # Step all envs (with auto_reset enabled, finished envs are auto-reset)
         next_states, rewards, terminated, truncated, infos = envs.step(actions)
         done_mask = np.asarray(terminated) | np.asarray(truncated)
 
-        # Handle individual env done/resets and process observations
         for i in range(num_envs):
             r = rewards[i]
             d = bool(done_mask[i])
 
-            # When auto_reset is enabled, next_states contains the reset obs for done envs.
-            # The actual terminal observation is stored in infos["final_observation"].
             if (
                 d
                 and "final_observation" in infos
                 and infos["final_observation"][i] is not None
             ):
-                ns = infos["final_observation"][i]  # Use actual terminal state
+                ns = infos["final_observation"][
+                    i
+                ]  # use actual terminal state instead of that stupid thing i was doing
             else:
                 ns = next_states[i]
 
@@ -552,10 +547,8 @@ def train(
                 avg_reward = 0.0
                 episodes = 10
 
-                # First pass: calculate avg_reward without video
                 for ep_idx in range(episodes):
                     eval_env = gym.make("CarRacing-v3")
-                    # Apply same preprocessing as training envs
                     eval_env = GrayscaleObservation(eval_env, keep_dim=False)
                     obs_space = eval_env.observation_space
                     normalized_obs_space = gym.spaces.Box(
@@ -585,7 +578,7 @@ def train(
                     eval_env.close()
                 avg_reward /= episodes
 
-                # Record video only if new reward record
+                # record vid if its the best rewrad:
                 if avg_reward > best_eval_reward:
                     best_eval_reward = avg_reward
                     print(f"New reward record: {avg_reward:.2f}! Recording video...")
@@ -633,7 +626,6 @@ def train(
                     except Exception as e:
                         print(f"[WandbLogger] Failed to log video: {e}")
 
-                    # Save best model
                     if save_models:
                         agent.save_model("carracer", "best")
                 else:
@@ -653,7 +645,7 @@ def train(
                     memory.save(
                         f"buffer_{getuser()}_{date.month}_{date.day}_{date.hour}"
                     )
-                # Always save last model checkpoint
+
                 if save_models:
                     agent.save_model("carracer", "last")
 
@@ -669,15 +661,15 @@ if __name__ == "__main__":
         load_models=True,
         save_memory=False,
         save_models=True,
-        num_envs=12,  # More parallel environments
-        use_per=False,  # Disable PER for stability
+        num_envs=12,
+        use_per=False,  # TODO: once this stops being stupid, use PER
         initial_step=10_000,
-        updates_per_step=2,  # More updates per env step
-        log_interval=100,  # Log less frequently
-        use_async_envs=True,  # Async envs for parallelism
-        prefetch_batches=3,  # Prefetch data batches
+        updates_per_step=2,
+        log_interval=100,
+        use_async_envs=True,
+        prefetch_batches=3,
         path_to_buffer="memory\\memory\\buffer_talk2_6h7jpbd_12_25_19.pkl",
-        path_to_actor="models\\sac_actor_carracer_bc_best.pt",
-        path_to_critic="models\\sac_critic_carracer_bc_best.pt",
-        path_to_encoder="models\\sac_encoder_carracer_bc_best.pt",
+        path_to_actor="models\\sac_actor_carracer_talk2_6h7jpbd_12_26_16.pt",
+        path_to_critic="models\\sac_critic_carracer_talk2_6h7jpbd_12_26_16.pt",
+        path_to_encoder="models\\sac_encoder_carracer_talk2_6h7jpbd_12_26_16.pt",
     )

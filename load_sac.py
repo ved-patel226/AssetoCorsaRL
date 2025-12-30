@@ -47,12 +47,11 @@ def load_agent(
     path_to_critic: str = None,
 ):
     """Load a trained SAC agent."""
-    # Create dummy env to get action space
+    # create dummy env to get action space
     env = gym.make("CarRacing-v3")
     action_space = env.action_space
     env.close()
 
-    # Create SAC agent with same architecture as training
     agent = SAC(
         action_space,
         policy="Gaussian",
@@ -67,7 +66,6 @@ def load_agent(
         in_channels=3,
     )
 
-    # Load model weights
     agent.load_model(path_to_actor, path_to_critic, path_to_encoder)
     print(f"Loaded model from {path_to_actor} and {path_to_encoder}")
 
@@ -94,10 +92,9 @@ def play_episodes(
         print(f"\n--- Episode {ep + 1}/{num_episodes} ---")
 
         while not done:
-            # Select action (eval=True for deterministic/mean action)
+            # eval=True for deterministic
             action = agent.select_action(state, eval=deterministic)
 
-            # Step environment
             next_state, reward, terminated, truncated, info = env.step(action)
             done = terminated or truncated
 
@@ -105,7 +102,6 @@ def play_episodes(
             episode_reward += reward
             step_count += 1
 
-            # Print progress every 100 steps
             if step_count % 100 == 0:
                 print(f"  Steps: {step_count}, Reward: {episode_reward:.2f}")
 
@@ -116,7 +112,6 @@ def play_episodes(
 
     env.close()
 
-    # Summary
     print(f"\n{'='*50}")
     print(f"Results over {num_episodes} episodes:")
     print(f"  Mean reward: {np.mean(total_rewards):.2f}")
@@ -169,10 +164,8 @@ def main():
 
     args = parser.parse_args()
 
-    # Load agent
     agent = load_agent(args.actor, args.encoder, args.critic)
 
-    # Play episodes
     render_mode = None if args.no_render else "human"
     play_episodes(
         agent,
