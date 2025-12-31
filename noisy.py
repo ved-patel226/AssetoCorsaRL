@@ -246,10 +246,10 @@ class FactorisedNoisyLayer(AbstractNoisyLayer):
                 self.out_features, device=self.epsilon_output.device
             )
             self.epsilon_input.copy_(
-                src=epsilon_input.sign() * torch.sqrt(torch.abs(epsilon_input))
+                epsilon_input.sign() * torch.sqrt(torch.abs(epsilon_input))
             )
             self.epsilon_output.copy_(
-                src=epsilon_output.sign() * torch.sqrt(torch.abs(epsilon_output))
+                epsilon_output.sign() * torch.sqrt(torch.abs(epsilon_output))
             )
         self.cached_weight = None
         self.cached_bias = None

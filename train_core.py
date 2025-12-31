@@ -75,29 +75,7 @@ class Trainer:
 
     def _get_alpha_value(self):
         """Return current alpha value (prefer model parameter if present)."""
-        if hasattr(self, "log_alpha"):
-            la = getattr(self, "log_alpha")
-            if isinstance(la, (torch.nn.Parameter, torch.Tensor)):
-                return float(la.exp().item())
-            return float(torch.exp(torch.tensor(la)).item())
-        if hasattr(self, "alpha"):
-            a = getattr(self, "alpha")
-            if isinstance(a, (torch.nn.Parameter, torch.Tensor)):
-                return float(a.item())
-            return float(a)
-
-    # ===== Collection =====
-    def collect_initial_data(self):
-        print("Collecting initial random data...")
-        while len(self.rb) < self.cfg.start_steps:
-            self._step_random()
-        print(f"Initialized replay buffer with {len(self.rb)} transitions")
-        return (
-            self.current_td,
-            self.total_steps,
-            self.episode_returns,
-            self.current_episode_return,
-        )
+        return float(self.log_alpha.exp().item())
 
     def _step_random(self):
         actions = sample_random_action(self.cfg.num_envs)
@@ -126,9 +104,9 @@ class Trainer:
         Uses `cfg` values (source of truth). If noisy-network exploration is enabled in the
         config, epsilon-greedy is disabled (returns 0.0).
         """
-        # If using noisy-network exploration, we do not use epsilon-greedy
-        if getattr(self.cfg, "noisy_exploration", False):
+        if self.cfg.use_noisy:
             return 0.0
+
         start = float(getattr(self.cfg, "explore_start", 1.0))
         end = float(getattr(self.cfg, "explore_end", 0.0))
         steps = int(getattr(self.cfg, "explore_steps", 100_000))
@@ -155,7 +133,7 @@ class Trainer:
             actor_input = TensorDict(
                 {"pixels": pixels_only}, batch_size=[pixels_only.shape[0]]
             )
-            # If using noisy-net exploration, resample actor noise each step
+            # if using noisy-net exploration, resample actor noise each step
             if getattr(self.cfg, "use_noisy", False):
                 try:
                     for m in self.actor.modules():
