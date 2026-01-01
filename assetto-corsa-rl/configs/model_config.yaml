@@ -4,13 +4,13 @@ model:
   lr: 3e-4
   max_grad_norm: 1.0
 
-  gamma: 0.99 # Higher discount factor for better long-term credit assignment
-  tau: 0.005 # Slower target updates prevent Q-value divergence (was 0.01)
+  gamma: 0.99 # more long-term rewards
+  tau: 0.005 # prevent q-value collapse maybe
 
   # entropy
   alpha: 0.2
-  alpha_lr: 3e-4 # Slower alpha learning prevents entropy collapse
-  alpha_min: 0.01 # Minimum alpha to maintain exploration
+  alpha_lr: 3e-4
+  alpha_min: 0.01
 
   # replay / training
   batch_size: 512

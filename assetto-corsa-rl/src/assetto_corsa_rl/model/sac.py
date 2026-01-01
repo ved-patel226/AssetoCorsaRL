@@ -48,6 +48,8 @@ class SACPolicy:
 
         action_dim = int(env.action_spec.shape[-1])
 
+        in_channels = 4  # TODO: remove this hardcoding later
+
         # helper to pick noisy vs lazy linear layers
         def _lin(out):
             if use_noisy:
@@ -55,21 +57,20 @@ class SACPolicy:
             return nn.LazyLinear(out, device=device)
 
         # CNN feature extractor for image inputs
+        # Input: [B, C, H, W] - e.g., [B, in_channels, 84, 84] (CarRacing frames stacked)
+        # For 84x84 inputs the conv outputs will be: 20x20 → 9x9 → 7x7 → flattened (64*7*7 = 3136)
         cnn_features = nn.Sequential(
-            # Input: [B, C, H, W] - typically [B, 3, 96, 96] for CarRacing
             nn.Conv2d(
-                3, 32, kernel_size=8, stride=4, padding=0, device=device
-            ),  # → [B, 32, 23, 23]
+                in_channels, 32, kernel_size=8, stride=4, padding=0, device=device
+            ),  # → [B, 32, 20, 20]
             nn.ReLU(),
-            nn.Conv2d(
-                32, 64, kernel_size=4, stride=2, padding=0, device=device
-            ),  # → [B, 64, 10, 10]
+            nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=0, device=device),
+            # → [B, 64, 9, 9]
             nn.ReLU(),
-            nn.Conv2d(
-                64, 64, kernel_size=3, stride=1, padding=0, device=device
-            ),  # → [B, 64, 8, 8]
+            nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=0, device=device),
+            # → [B, 64, 7, 7]
             nn.ReLU(),
-            nn.Flatten(start_dim=1),  # → [B, 64*8*8] = [B, 4096]
+            nn.Flatten(start_dim=1),  # → [B, 64*7*7] = [B, 3136]
         )
 
         actor_net = nn.Sequential(
@@ -129,7 +130,9 @@ class SACPolicy:
         )
 
         value_cnn = nn.Sequential(
-            nn.Conv2d(3, 32, kernel_size=8, stride=4, padding=0, device=device),
+            nn.Conv2d(
+                in_channels, 32, kernel_size=8, stride=4, padding=0, device=device
+            ),
             nn.ReLU(),
             nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=0, device=device),
             nn.ReLU(),
@@ -151,7 +154,9 @@ class SACPolicy:
 
         # CNN feature extractor for target value network
         value_cnn_target = nn.Sequential(
-            nn.Conv2d(3, 32, kernel_size=8, stride=4, padding=0, device=device),
+            nn.Conv2d(
+                in_channels, 32, kernel_size=8, stride=4, padding=0, device=device
+            ),
             nn.ReLU(),
             nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=0, device=device),
             nn.ReLU(),
@@ -174,7 +179,14 @@ class SACPolicy:
             def __init__(self, hidden: int, device):
                 super().__init__()
                 self.cnn = nn.Sequential(
-                    nn.Conv2d(3, 32, kernel_size=8, stride=4, padding=0, device=device),
+                    nn.Conv2d(
+                        in_channels,
+                        32,
+                        kernel_size=8,
+                        stride=4,
+                        padding=0,
+                        device=device,
+                    ),
                     nn.ReLU(),
                     nn.Conv2d(
                         32, 64, kernel_size=4, stride=2, padding=0, device=device
