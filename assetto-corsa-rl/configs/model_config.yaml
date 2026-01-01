@@ -14,12 +14,12 @@ model:
   # replay / training
   batch_size: 512
   replay_size: 600000
-  start_steps: 1000
+  # start_steps: 1000
 
   load_initial: true
 
   # noisy nets
-  use_noisy: true
+  use_noisy: false # Disabled - use epsilon-greedy first
   noise_sigma: 0.5
 
   # PER

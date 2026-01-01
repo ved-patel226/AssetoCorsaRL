@@ -137,12 +137,16 @@ def train():
 
     import wandb
 
-    wandb.init(
-        project=cfg.wandb_project,
-        entity=cfg.wandb_entity,
-        name=cfg.wandb_name,
-        config={"seed": cfg.seed, "total_steps": cfg.total_steps},
-    )
+    wandb_kwargs = {
+        "project": cfg.wandb_project,
+        "config": {"seed": cfg.seed, "total_steps": cfg.total_steps},
+    }
+    if getattr(cfg, "wandb_entity", None):
+        wandb_kwargs["entity"] = cfg.wandb_entity
+    if getattr(cfg, "wandb_name", None):
+        wandb_kwargs["name"] = cfg.wandb_name
+
+    wandb.init(**wandb_kwargs)
     print("WandB initialized:", getattr(wandb.run, "name", None))
 
     env = create_gym_env(device=device, num_envs=cfg.num_envs)

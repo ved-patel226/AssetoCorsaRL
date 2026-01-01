@@ -282,10 +282,9 @@ class Trainer:
 
         pixels_b = batch["pixels"]
 
-        if self.cfg.use_noisy:
-            for m in self.actor.modules():
-                if hasattr(m, "sample_noise"):
-                    m.sample_noise()
+        # NOTE: Do NOT sample noise during gradient updates
+        # Noisy networks should only resample during environment rollout
+        # Sampling here adds unnecessary variance to gradients
 
         if isinstance(pixels_b, torch.Tensor) and not torch.is_floating_point(pixels_b):
             pixels_b = unpack_pixels(pixels_b).to(self.device)
@@ -411,6 +410,10 @@ class Trainer:
         # Equivalently: minimize α * log π(a|s) - Q(s,a)
         actor_loss = (alpha.detach() * log_prob_new - min_q_new).mean()
 
+        # Add L2 regularization on actions to prevent extreme outputs
+        action_reg = 0.01 * (new_actions**2).mean()
+        actor_loss = actor_loss + action_reg
+
         self.actor_opt.zero_grad()
         actor_loss.backward()
         torch.nn.utils.clip_grad_norm_(self.actor.parameters(), self.cfg.max_grad_norm)
@@ -447,6 +450,7 @@ class Trainer:
                 "actor/mean_log_prob": log_prob_new.mean().item(),
                 "actor/entropy": -log_prob_new.mean().item(),
                 "actor/alpha": alpha.item(),
+                "actor/alpha_loss": alpha_loss.item(),
                 #
                 "reward/rewards_per_step_mean": rewards_b.mean().item(),
                 "reward/rewards_per_step_max": rewards_b.max().item(),
@@ -461,8 +465,6 @@ class Trainer:
                 "per/td_error_min": td_errors.min().item(),
                 "per/beta": beta,
             }
-            if alpha_loss is not None:
-                log_dict["alpha_loss"] = alpha_loss.item()
 
             wandb.log(log_dict, step=self.total_steps)
         except Exception as e:
@@ -512,11 +514,11 @@ class Trainer:
                         "buffer": len(self.rb),
                         "time": elapsed,
                         "epsilon": eps,
-                        "alpha": (
-                            alpha_val
-                            if alpha_val is not None
-                            else float(self.cfg.alpha)
-                        ),
+                        # "alpha": (
+                        #     alpha_val
+                        #     if alpha_val is not None
+                        #     else float(self.cfg.alpha)
+                        # ),
                     },
                     step=self.total_steps,
                 )

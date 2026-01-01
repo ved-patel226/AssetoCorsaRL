@@ -5,4 +5,4 @@ environment:
   # exploration
   explore_start: 1.0
   explore_end: 0.03
-  explore_steps: 100000
+  explore_steps: 500000

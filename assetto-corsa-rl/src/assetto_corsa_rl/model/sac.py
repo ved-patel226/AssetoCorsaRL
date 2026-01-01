@@ -90,12 +90,22 @@ class SACPolicy:
                 )
                 low_t = -torch.ones_like(low_t)
                 high_t = torch.ones_like(high_t)
-            dist_kwargs = {"low": low_t, "high": high_t}  # ← Remove min_scale/max_scale
+            dist_kwargs = {
+                "low": low_t,
+                "high": high_t,
+                "min": 1e-4,  # Prevent scale collapse
+                "max": 1.0,  # Reasonable upper bound
+            }
         except Exception as _e:
             print(
                 f"Warning: could not validate action bounds ({_e}); using raw spec values."
             )
-            dist_kwargs = {"low": low, "high": high}  # ← Remove min_scale/max_scale
+            dist_kwargs = {
+                "low": low,
+                "high": high,
+                # "min": 1e-4,
+                # "max": 1.0,
+            }
 
         self.actor = ProbabilisticActor(
             module=policy_module,
