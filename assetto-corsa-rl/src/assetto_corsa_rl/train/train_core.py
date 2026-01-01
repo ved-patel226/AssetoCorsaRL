@@ -5,6 +5,7 @@ module-level functions `collect_initial_data` and `run_training_loop`
 for backward compatibility.
 """
 
+import math
 import time
 import torch
 import torch.nn.functional as F
@@ -316,9 +317,8 @@ class Trainer:
                 next_pixels_b.shape[0],
                 action_dim=self.env.action_spec.shape[-1],
             )
-            next_log_prob = next_out.get("log_prob")
-            if next_log_prob is not None and next_log_prob.ndim == 1:
-                next_log_prob = next_log_prob.view(-1, 1)
+            next_log_prob = next_out["action_log_prob"]
+            next_log_prob = next_log_prob.view(-1, 1)
 
             # Compute target Q-values using target networks (clipped double-Q)
             next_q1 = self.q1_target(next_pixels_b, next_actions).view(-1, 1)
@@ -328,6 +328,9 @@ class Trainer:
             # SAC target with entropy regularization
             if self.log_alpha is not None:
                 alpha = self.log_alpha.exp()
+                # Clamp alpha to prevent entropy collapse
+                alpha_min = getattr(self.cfg, "alpha_min", 0.01)
+                alpha = torch.clamp(alpha, min=alpha_min)
             else:
                 alpha = self.cfg.alpha
 
@@ -338,6 +341,10 @@ class Trainer:
 
             # Bellman backup: Q(s,a) = r + γ * (1 - done) * V(s')
             q_target = rewards_b + self.cfg.gamma * (1.0 - dones_b) * next_v
+
+            # Clip Q-targets to prevent divergence (critical for stability)
+            # Range based on expected discounted returns for your reward scale
+            q_target = torch.clamp(q_target, min=-200.0, max=200.0)
 
         # Compute current Q-values
         actions_b = fix_action_shape(
@@ -385,9 +392,14 @@ class Trainer:
         new_actions = fix_action_shape(
             out["action"], pixels_b.shape[0], action_dim=self.env.action_spec.shape[-1]
         )
-        log_prob_new = out.get("log_prob")
+
+        log_prob_new = out["action_log_prob"]
         if log_prob_new is None:
+            print(
+                f"WARNING: No log_prob returned! Actor output keys: {list(out.keys())}"
+            )
             log_prob_new = torch.zeros((new_actions.shape[0], 1), device=self.device)
+
         if log_prob_new.ndim == 1:
             log_prob_new = log_prob_new.view(-1, 1)
 
@@ -410,10 +422,6 @@ class Trainer:
         # Equivalently: minimize α * log π(a|s) - Q(s,a)
         actor_loss = (alpha.detach() * log_prob_new - min_q_new).mean()
 
-        # Add L2 regularization on actions to prevent extreme outputs
-        action_reg = 0.01 * (new_actions**2).mean()
-        actor_loss = actor_loss + action_reg
-
         self.actor_opt.zero_grad()
         actor_loss.backward()
         torch.nn.utils.clip_grad_norm_(self.actor.parameters(), self.cfg.max_grad_norm)
@@ -430,13 +438,20 @@ class Trainer:
 
             self.alpha_opt.zero_grad()
             alpha_loss.backward()
+            torch.nn.utils.clip_grad_norm_([self.log_alpha], max_norm=1.0)
             self.alpha_opt.step()
+
+            # Clamp log_alpha to prevent entropy collapse
+            alpha_min = getattr(self.cfg, "alpha_min", 0.01)
+            with torch.no_grad():
+                self.log_alpha.data.clamp_(min=math.log(alpha_min))
 
         # ===== Soft Update Target Networks =====
         self._soft_update_target()
 
         # ===== Logging =====
         try:
+            current_entropy = -log_prob_new.mean().item()
             log_dict = {
                 "loss/critic_loss": critic_loss.item(),
                 "loss/q1_loss": q1_loss.item(),
@@ -448,9 +463,13 @@ class Trainer:
                 "critic/next_v_mean": next_v.mean().item(),
                 #
                 "actor/mean_log_prob": log_prob_new.mean().item(),
-                "actor/entropy": -log_prob_new.mean().item(),
+                "actor/entropy": current_entropy,
+                "actor/target_entropy": self.target_entropy,
+                "actor/entropy_gap": current_entropy - self.target_entropy,
                 "actor/alpha": alpha.item(),
-                "actor/alpha_loss": alpha_loss.item(),
+                "actor/alpha_loss": (
+                    alpha_loss.item() if alpha_loss is not None else 0.0
+                ),
                 #
                 "reward/rewards_per_step_mean": rewards_b.mean().item(),
                 "reward/rewards_per_step_max": rewards_b.max().item(),

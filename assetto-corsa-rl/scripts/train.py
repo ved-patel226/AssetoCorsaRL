@@ -233,7 +233,7 @@ def train():
     log_alpha = nn.Parameter(torch.tensor(math.log(cfg.alpha), device=device))
     alpha_opt = torch.optim.Adam([log_alpha], lr=cfg.alpha_lr)
 
-    target_entropy = -float(env.action_spec.shape[-1])  # -dim(A)
+    target_entropy = -0.5 * float(env.action_spec.shape[-1])
     print(f"Target entropy: {target_entropy}")
 
     print("using PrioritizedReplayBuffer with LazyTensorStorage")

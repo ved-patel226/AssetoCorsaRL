@@ -54,10 +54,26 @@ class SACPolicy:
                 return NoisyLazyLinear(out, sigma=noise_sigma, device=device)
             return nn.LazyLinear(out, device=device)
 
+        # CNN feature extractor for image inputs
+        cnn_features = nn.Sequential(
+            # Input: [B, C, H, W] - typically [B, 3, 96, 96] for CarRacing
+            nn.Conv2d(
+                3, 32, kernel_size=8, stride=4, padding=0, device=device
+            ),  # → [B, 32, 23, 23]
+            nn.ReLU(),
+            nn.Conv2d(
+                32, 64, kernel_size=4, stride=2, padding=0, device=device
+            ),  # → [B, 64, 10, 10]
+            nn.ReLU(),
+            nn.Conv2d(
+                64, 64, kernel_size=3, stride=1, padding=0, device=device
+            ),  # → [B, 64, 8, 8]
+            nn.ReLU(),
+            nn.Flatten(start_dim=1),  # → [B, 64*8*8] = [B, 4096]
+        )
+
         actor_net = nn.Sequential(
-            nn.Flatten(start_dim=1),  # flatten [B, C, H, W] → [B, C*H*W]
-            _lin(num_cells),
-            nn.Tanh(),
+            cnn_features,
             _lin(num_cells),
             nn.Tanh(),
             _lin(num_cells),
@@ -93,8 +109,6 @@ class SACPolicy:
             dist_kwargs = {
                 "low": low_t,
                 "high": high_t,
-                "min": 1e-4,  # Prevent scale collapse
-                "max": 1.0,  # Reasonable upper bound
             }
         except Exception as _e:
             print(
@@ -103,8 +117,6 @@ class SACPolicy:
             dist_kwargs = {
                 "low": low,
                 "high": high,
-                # "min": 1e-4,
-                # "max": 1.0,
             }
 
         self.actor = ProbabilisticActor(
@@ -116,10 +128,18 @@ class SACPolicy:
             return_log_prob=True,
         )
 
-        value_net = nn.Sequential(
+        value_cnn = nn.Sequential(
+            nn.Conv2d(3, 32, kernel_size=8, stride=4, padding=0, device=device),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=0, device=device),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=0, device=device),
+            nn.ReLU(),
             nn.Flatten(start_dim=1),
-            _lin(num_cells),
-            nn.Tanh(),
+        )
+
+        value_net = nn.Sequential(
+            value_cnn,
             _lin(num_cells),
             nn.Tanh(),
             _lin(num_cells),
@@ -129,10 +149,19 @@ class SACPolicy:
 
         self.value = ValueOperator(module=value_net, in_keys=["pixels"])
 
-        value_net_target = nn.Sequential(
+        # CNN feature extractor for target value network
+        value_cnn_target = nn.Sequential(
+            nn.Conv2d(3, 32, kernel_size=8, stride=4, padding=0, device=device),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=0, device=device),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=0, device=device),
+            nn.ReLU(),
             nn.Flatten(start_dim=1),
-            _lin(num_cells),
-            nn.Tanh(),
+        )
+
+        value_net_target = nn.Sequential(
+            value_cnn_target,
             _lin(num_cells),
             nn.Tanh(),
             _lin(num_cells),
@@ -144,9 +173,21 @@ class SACPolicy:
         class CriticNet(nn.Module):
             def __init__(self, hidden: int, device):
                 super().__init__()
-                self.net = nn.Sequential(
-                    _lin(hidden),
-                    nn.Tanh(),
+                self.cnn = nn.Sequential(
+                    nn.Conv2d(3, 32, kernel_size=8, stride=4, padding=0, device=device),
+                    nn.ReLU(),
+                    nn.Conv2d(
+                        32, 64, kernel_size=4, stride=2, padding=0, device=device
+                    ),
+                    nn.ReLU(),
+                    nn.Conv2d(
+                        64, 64, kernel_size=3, stride=1, padding=0, device=device
+                    ),
+                    nn.ReLU(),
+                    nn.Flatten(start_dim=1),
+                )
+
+                self.fc = nn.Sequential(
                     _lin(hidden),
                     nn.Tanh(),
                     _lin(hidden),
@@ -155,10 +196,10 @@ class SACPolicy:
                 )
 
             def forward(self, pixels, action):
-                obs = pixels.flatten(start_dim=1)
+                img_features = self.cnn(pixels)
                 act = action.flatten(start_dim=1)
-                x = torch.cat([obs, act], dim=-1)
-                return self.net(x)
+                x = torch.cat([img_features, act], dim=-1)
+                return self.fc(x)
 
         q1_net = CriticNet(num_cells, device)
         q2_net = CriticNet(num_cells, device)
