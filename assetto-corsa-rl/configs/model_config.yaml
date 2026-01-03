@@ -6,7 +6,7 @@ model:
   gamma: 0.99 # > 1 = longer term, < 1 = shorter term
   tau: 0.01
 
-  alpha: 0.1
+  alpha: 0.2 # initial entropy temperature
   alpha_lr: 3e-4 # alpha lr, should be around the same
   alpha_min: 0.01
 

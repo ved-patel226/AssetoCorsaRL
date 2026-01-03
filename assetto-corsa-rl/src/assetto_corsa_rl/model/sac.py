@@ -71,7 +71,7 @@ class SACPolicy:
         )
 
         class BoundedNormalParams(nn.Module):
-            def __init__(self, min_scale=0.1, max_scale=1.0):
+            def __init__(self, min_scale=0.1, max_scale=2.0):
                 super().__init__()
                 self.min_scale = min_scale
                 self.max_scale = max_scale
