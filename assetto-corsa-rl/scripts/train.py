@@ -250,7 +250,7 @@ def train():
 
     # More moderate target entropy for bounded action spaces
     # Standard SAC uses -action_dim, but -0.5 * action_dim works better for bounded actions
-    target_entropy = float(env.action_spec.shape[-1])  # -1.5 for 3D action space
+    target_entropy = -float(env.action_spec.shape[-1])  # -1.5 for 3D action space
     print(f"Target entropy: {target_entropy}")
 
     print("using PrioritizedReplayBuffer with LazyTensorStorage")

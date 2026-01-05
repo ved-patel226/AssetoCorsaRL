@@ -1,26 +1,24 @@
 model:
-  num_cells: 256 # hidden layer size for MLPs
+  num_cells: 256
   lr: 3e-4
   max_grad_norm: 1.0
 
-  gamma: 0.99 # > 1 = longer term, < 1 = shorter term
-  tau: 0.01
+  gamma: 0.99
+  tau: 0.05
 
-  alpha: 0.2 # initial entropy temperature
-  alpha_lr: 3e-4 # alpha lr, should be around the same
-  alpha_min: 0.01
+  alpha: 0.2
+  alpha_lr: 3e-4
+  alpha_min: 0.05
 
   batch_size: 512
-  replay_size: 1_000_000 # as RAM permits, higher = better
+  replay_size: 1_000_000
 
-  update_every: 512 #  update after every 512 env steps (if CPU bottleneck, increase this, if GPU bottleneck, decrease this)
+  update_every: 256
 
   load_initial: true
 
-  # noisy nets
-  use_noisy: false # Disabled - use epsilon-greedy first
+  use_noisy: true
   noise_sigma: 0.5
 
-  # PER
   per_alpha: 0.6
-  per_beta: 0.4 # anneals to 1.0 over training, this is the starting value
+  per_beta: 0.4

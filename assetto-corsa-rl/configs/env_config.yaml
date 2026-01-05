@@ -4,5 +4,5 @@ environment:
 
   #* exploration - IGNORE IF NOISY NETS ARE USED!!!!!
   explore_start: 1.0
-  explore_end: 0.01 # Lower floor for less random exploration
+  explore_end: 0.03 # Lower floor for less random exploration
   explore_steps: 500_000 # Faster decay to rely on learned policy

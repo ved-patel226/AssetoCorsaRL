@@ -84,16 +84,21 @@ class SACPolicy:
                 scale = self.min_scale + torch.sigmoid(scale_raw) * self.scale_range
                 return {"loc": loc, "scale": scale}
 
+        # Helper to choose between noisy and standard linear layers
+        def _make_linear(in_f: int, out_f: int):
+            if self.use_noisy:
+                # Lazy noisy linear is used so we don't need to specify in_features explicitly
+                return NoisyLazyLinear(out_f, sigma=self.noise_sigma, device=device)
+            return nn.Linear(in_f, out_f, device=device)
+
         actor_net = nn.Sequential(
             cnn_features,
-            nn.Linear(cnn_output_size, num_cells, device=device),
+            _make_linear(cnn_output_size, num_cells),
             nn.Tanh(),
-            nn.Linear(num_cells, num_cells, device=device),
+            _make_linear(num_cells, num_cells),
             nn.Tanh(),
-            nn.Linear(num_cells, 2 * action_dim, device=device),
-            BoundedNormalParams(
-                min_scale=0.1, max_scale=1.0
-            ),  # Clamp scale to prevent excessive exploration
+            _make_linear(num_cells, 2 * action_dim),
+            BoundedNormalParams(min_scale=0.1, max_scale=1.0),
         )
 
         policy_module = TensorDictModule(
@@ -141,6 +146,13 @@ class SACPolicy:
             distribution_kwargs=dist_kwargs,
             return_log_prob=True,
         )
+
+        # Informational log when noisy nets are enabled
+        if self.use_noisy:
+            noisy_count = sum(
+                1 for m in self.actor.modules() if hasattr(m, "sample_noise")
+            )
+            print(f"Using noisy actor: found {noisy_count} noisy layer(s)")
 
         value_cnn = nn.Sequential(
             nn.Conv2d(
@@ -246,6 +258,13 @@ class SACPolicy:
 
         self.q1_target.load_state_dict(self.q1.state_dict())
         self.q2_target.load_state_dict(self.q2.state_dict())
+
+    def sample_noise(self):
+        """Resample noise for all noisy layers in the actor (and others if present)."""
+        for name, module in self.modules().items():
+            for m in module.modules():
+                if hasattr(m, "sample_noise"):
+                    m.sample_noise()
 
     def modules(self):
         return {
