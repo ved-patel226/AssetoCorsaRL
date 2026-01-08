@@ -89,25 +89,30 @@ class SACPolicy:
             )
 
         class BoundedNormalParams(nn.Module):
-            def __init__(self, min_scale=0.1, max_scale=2.0):
+            def __init__(self, min_scale=None, max_scale=None):
                 super().__init__()
-                self.min_scale = min_scale
-                self.max_scale = max_scale
-                self.scale_range = max_scale - min_scale
+                if min_scale is None:
+                    min_scale = torch.tensor([0.1])
+                if max_scale is None:
+                    max_scale = torch.tensor([2.0])
+                self.register_buffer("min_scale", min_scale)
+                self.register_buffer("max_scale", max_scale)
+                self.register_buffer("scale_range", max_scale - min_scale)
 
             def forward(self, x):
                 # x shape: [batch, 2*action_dim]
                 loc, scale_raw = x.chunk(2, dim=-1)
-                # Use sigmoid to bound between [min_scale, max_scale]
+                # Use sigmoid to bound between [min_scale, max_scale] per dimension
                 scale = self.min_scale + torch.sigmoid(scale_raw) * self.scale_range
                 return {"loc": loc, "scale": scale}
 
-        # Helper to choose between noisy and standard linear layers
         def _make_linear(in_f: int, out_f: int):
             if self.use_noisy:
-                # Lazy noisy linear is used so we don't need to specify in_features explicitly
                 return NoisyLazyLinear(out_f, sigma=self.noise_sigma, device=device)
             return nn.Linear(in_f, out_f, device=device)
+
+        min_scale = torch.tensor([1e-3, 1e-3, 1e-3], device=device)
+        max_scale = torch.tensor([1.0, 0.5, 0.5], device=device)
 
         actor_net = nn.Sequential(
             cnn_features,
@@ -116,7 +121,7 @@ class SACPolicy:
             _make_linear(num_cells, num_cells),
             nn.Tanh(),
             _make_linear(num_cells, 2 * action_dim),
-            BoundedNormalParams(min_scale=0.3, max_scale=3.0),
+            BoundedNormalParams(min_scale=min_scale, max_scale=max_scale),
         )
 
         policy_module = TensorDictModule(

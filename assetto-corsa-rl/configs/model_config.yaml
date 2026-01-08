@@ -6,8 +6,6 @@ model:
   gamma: 0.99
   tau: 0.05
 
-  vae_checkpoint_path: null
-
   alpha: 0.2
   alpha_lr: 3e-4
   alpha_min: 0.1
@@ -26,6 +24,6 @@ model:
   per_beta: 0.4
 
   #* exploration - IGNORE IF NOISY NETS ARE USED!!!!!
-  explore_start: 0.25
+  explore_start: 1
   explore_end: 0.03
   explore_steps: 500_000
