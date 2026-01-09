@@ -457,7 +457,7 @@ class Trainer:
         ).sum(dim=-1, keepdim=True)
 
         # KL penalty coefficient (can be made configurable)
-        beta_kl = getattr(self.cfg, "beta_kl", 0.01)
+        beta_kl = getattr(self.cfg, "beta_kl", 0.001)
         kl_penalty = beta_kl * kl_div
 
         # Log KL divergence immediately after computation

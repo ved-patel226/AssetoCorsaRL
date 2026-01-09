@@ -12,14 +12,14 @@ from tensordict import TensorDict
 # Try absolute package imports first, and add the `src` directory to sys.path
 # if imports fail when running as a script.
 try:
-    from assetto_corsa_rl.env import create_gym_env
+    from assetto_corsa_rl.env_helper import create_gym_env
     from assetto_corsa_rl.model.sac import SACPolicy, get_device
     from assetto_corsa_rl.train.train_utils import fix_action_shape
 except Exception:
     src_path = str(Path(__file__).resolve().parents[1])
     if src_path not in sys.path:
         sys.path.insert(0, src_path)
-    from assetto_corsa_rl.env import create_gym_env
+    from assetto_corsa_rl.env_helper import create_gym_env
     from assetto_corsa_rl.model.sac import SACPolicy, get_device
     from assetto_corsa_rl.train.train_utils import fix_action_shape
 
@@ -73,7 +73,7 @@ def parse_args():
 
 def build_env(device, render: bool = False):
     mode = "human" if render else None
-    # single env for evaluation
+
     env = create_gym_env(device=device, num_envs=1, render_mode=mode)
     return env
 

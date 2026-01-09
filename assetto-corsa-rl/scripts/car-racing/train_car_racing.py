@@ -9,15 +9,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 try:
-    from assetto_corsa_rl.env import create_gym_env  # type: ignore
+    from assetto_corsa_rl.env_helper import create_gym_env  # type: ignore
     from assetto_corsa_rl.model.sac import SACPolicy, get_device  # type: ignore
     from assetto_corsa_rl.train.train_core import run_training_loop  # type: ignore
 except Exception:
-    repo_root = Path(__file__).resolve().parents[1]
+    repo_root = Path(__file__).resolve().parents[2]
     src_path = str(repo_root / "src")
     if src_path not in sys.path:
         sys.path.insert(0, src_path)
-    from assetto_corsa_rl.env import create_gym_env  # type: ignore
+    from assetto_corsa_rl.env_helper import create_gym_env  # type: ignore
     from assetto_corsa_rl.model.sac import SACPolicy, get_device  # type: ignore
     from assetto_corsa_rl.train.train_core import run_training_loop  # type: ignore
 
@@ -53,9 +53,9 @@ def load_cfg_from_yaml(root: Path = None):
         # project root (assetto-corsa-rl)
         root = Path(__file__).resolve().parents[1]
 
-    env_p = root / "configs" / "env_config.yaml"
-    model_p = root / "configs" / "model_config.yaml"
-    train_p = root / "configs" / "train_config.yaml"
+    env_p = root / "configs" / "car-racing" / "env_config.yaml"
+    model_p = root / "configs" / "car-racing" / "model_config.yaml"
+    train_p = root / "configs" / "car-racing" / "train_config.yaml"
 
     def _read(p):
         try:

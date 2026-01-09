@@ -15,7 +15,7 @@ import torch
 from torch.utils.data import DataLoader, IterableDataset
 from torchvision import transforms as T
 
-repo_root = Path(__file__).resolve().parents[1]
+repo_root = Path(__file__).resolve().parents[2]
 src_path = str(repo_root / "src")
 if src_path not in sys.path:
     sys.path.insert(0, src_path)

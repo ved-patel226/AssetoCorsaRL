@@ -20,14 +20,14 @@ from tensordict import TensorDict
 import cv2
 
 try:
-    from assetto_corsa_rl.env import create_gym_env  # type: ignore
+    from assetto_corsa_rl.env_helper import create_gym_env  # type: ignore
     from assetto_corsa_rl.model.sac import SACPolicy, get_device  # type: ignore
 except Exception:
-    repo_root = Path(__file__).resolve().parents[1]
+    repo_root = Path(__file__).resolve().parents[2]
     src_path = str(repo_root / "src")
     if src_path not in sys.path:
         sys.path.insert(0, src_path)
-    from assetto_corsa_rl.env import create_gym_env  # type: ignore
+    from assetto_corsa_rl.env_helper import create_gym_env  # type: ignore
     from assetto_corsa_rl.model.sac import SACPolicy, get_device  # type: ignore
 
 

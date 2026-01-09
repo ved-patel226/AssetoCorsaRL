@@ -16,7 +16,7 @@ except Exception:
     pygame = None
 
 from tensordict import TensorDict
-from assetto_corsa_rl.env import create_gym_env  # type: ignore
+from assetto_corsa_rl.env_helper import create_gym_env  # type: ignore
 
 
 @pytest.mark.skipif(
