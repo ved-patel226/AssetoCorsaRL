@@ -10,8 +10,12 @@ import time
 import sys
 
 
-def test_xbox_connection():
-    """Test Xbox controller connection and basic functionality."""
+def test_xbox_connection(gamepad=None):
+    """Test Xbox controller connection and basic functionality.
+
+    If a `gamepad` instance is provided it will be reused; otherwise a new
+    virtual controller will be created for the test.
+    """
 
     print("=" * 60)
     print("Xbox Controller (ViGEm) Connection Test")
@@ -31,19 +35,22 @@ def test_xbox_connection():
         print("  Download from: https://github.com/ViGEm/ViGEmBus/releases")
         return None
 
-    # Step 2: Try to create gamepad
-    print("\n[2/4] Creating virtual Xbox 360 gamepad...")
-    try:
-        gamepad = vg.VX360Gamepad()
-        print("✓ Virtual Xbox 360 gamepad connected")
-        print("   (Check Windows Settings > Devices > Bluetooth & other devices)")
-    except Exception as e:
-        print(f"❌ Failed to create gamepad: {e}")
-        print("\nPossible issues:")
-        print("  1. ViGEmBus driver not installed")
-        print("  2. Driver not running properly")
-        print("  3. Insufficient permissions (try running as administrator)")
-        return None
+    # Step 2: Create gamepad or use provided one
+    if gamepad is None:
+        print("\n[2/4] Creating virtual Xbox 360 gamepad...")
+        try:
+            gamepad = vg.VX360Gamepad()
+            print("✓ Virtual Xbox 360 gamepad connected")
+            print("   (Check Windows Settings > Devices > Bluetooth & other devices)")
+        except Exception as e:
+            print(f"❌ Failed to create gamepad: {e}")
+            print("\nPossible issues:")
+            print("  1. ViGEmBus driver not installed")
+            print("  2. Driver not running properly")
+            print("  3. Insufficient permissions (try running as administrator)")
+            return None
+    else:
+        print("\n[2/4] Using provided virtual Xbox 360 gamepad...")
 
     # Step 3: Test button
     print("\n[3/4] Testing A button...")
@@ -205,8 +212,12 @@ def test_racing_controls_float(gamepad):
     print("\n✓ Float API test completed!")
 
 
-def test_assetto_corsa_driving():
-    """Full Assetto Corsa driving test."""
+def test_assetto_corsa_driving(gamepad=None):
+    """Full Assetto Corsa driving test.
+
+    If a `gamepad` is provided it will be reused; otherwise the function will
+    attempt to create one before asking the user to start the test.
+    """
 
     print("\n" + "=" * 60)
     print("Assetto Corsa Driving Test")
@@ -220,20 +231,21 @@ def test_assetto_corsa_driving():
     print("   5. Be on track and ready to drive")
     print()
 
+    # Ensure a gamepad exists before prompting the user
+    if gamepad is None:
+        print("\n🎮 No gamepad provided. Attempting to create Xbox controller...")
+        try:
+            from pyvjoystick import vigem as vg
+
+            gamepad = vg.VX360Gamepad()
+            print("✓ Xbox 360 controller connected")
+        except Exception as e:
+            print(f"❌ Failed: {e}")
+            return
+
     response = input("Ready to start? [Y/n]: ").strip().lower()
     if response and response not in ["y", "yes"]:
         print("Test cancelled.")
-        return
-
-    # Create gamepad
-    print("\n🎮 Creating Xbox controller...")
-    try:
-        from pyvjoystick import vigem as vg
-
-        gamepad = vg.VX360Gamepad()
-        print("✓ Xbox 360 controller connected")
-    except Exception as e:
-        print(f"❌ Failed: {e}")
         return
 
     print("\nStarting driving test in 3 seconds...")
@@ -260,7 +272,6 @@ def test_assetto_corsa_driving():
         gamepad.update()
         time.sleep(1)
 
-        # Test 2: Steering sweep
         print("\n▶ Test 2: Steering Sweep (6s)")
         for i in range(60):
             steer = math.sin(i * 0.2) * 0.8  # -0.8 to +0.8
@@ -275,15 +286,12 @@ def test_assetto_corsa_driving():
         gamepad.update()
         time.sleep(1)
 
-        # Test 3: Combined driving
         print("\n▶ Test 3: Combined Driving (10s)")
         for i in range(100):
             t = i / 100.0
 
-            # Realistic steering
             steer = math.sin(t * 3 * math.pi) * 0.3
 
-            # Varying throttle (50-80%)
             throttle = 0.65 + 0.15 * math.sin(t * 5 * math.pi)
 
             gamepad.left_joystick_float(x_value_float=steer, y_value_float=0.0)
@@ -332,7 +340,29 @@ def test_assetto_corsa_driving():
 
 
 def main():
-    """Main test menu."""
+    """Main test menu.
+
+    The virtual Xbox 360 controller is initialized before showing the menu and
+    the same `gamepad` instance is reused for all tests.
+    """
+
+    # Initialize gamepad before asking for input
+    try:
+        from pyvjoystick import vigem as vg
+
+        print("Initializing virtual Xbox 360 controller...")
+        gamepad = vg.VX360Gamepad()
+        print("✓ Virtual Xbox 360 controller initialized — it will be reused for tests")
+    except ImportError as e:
+        print(f"❌ pyvjoystick is NOT installed: {e}")
+        print("\nTo install pyvjoystick: pip install pyvjoystick")
+        return None
+    except Exception as e:
+        print(f"❌ Failed to initialize gamepad: {e}")
+        print(
+            "\nPossible issues: ViGEmBus driver not installed or insufficient permissions"
+        )
+        return None
 
     print("Xbox Controller (ViGEm) Test Menu")
     print("=" * 60)
@@ -350,33 +380,34 @@ def main():
         choice = "1"
 
     if choice == "1":
-        gamepad = test_xbox_connection()
+        test_xbox_connection(gamepad)
     elif choice == "2":
-        gamepad = test_xbox_connection()
-        if gamepad:
+        if test_xbox_connection(gamepad):
             test_racing_controls(gamepad)
     elif choice == "3":
-        gamepad = test_xbox_connection()
-        if gamepad:
+        if test_xbox_connection(gamepad):
             test_racing_controls_float(gamepad)
     elif choice == "4":
-        test_assetto_corsa_driving()
+        test_assetto_corsa_driving(gamepad)
     elif choice == "5":
-        gamepad = test_xbox_connection()
-        if gamepad:
+        if test_xbox_connection(gamepad):
             test_racing_controls(gamepad)
             test_racing_controls_float(gamepad)
         print("\n⏸️  Waiting 3 seconds before AC test...")
         time.sleep(3)
-        test_assetto_corsa_driving()
+        test_assetto_corsa_driving(gamepad)
     else:
         print("Invalid choice. Running default test...")
-        test_xbox_connection()
+        test_xbox_connection(gamepad)
+
+    # Return the gamepad so the caller can perform cleanup if desired
+    return gamepad
 
 
 if __name__ == "__main__":
+    gamepad = None
     try:
-        main()
+        gamepad = main()
     except KeyboardInterrupt:
         print("\n\n⚠ Test interrupted by user")
         sys.exit(0)
@@ -386,3 +417,12 @@ if __name__ == "__main__":
 
         traceback.print_exc()
         sys.exit(1)
+    finally:
+        if gamepad:
+            try:
+                print("\n🔄 Resetting controller...")
+                gamepad.reset()
+                gamepad.update()
+                print("✓ Controller reset")
+            except Exception:
+                pass
