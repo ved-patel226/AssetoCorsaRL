@@ -16,8 +16,10 @@
 </div>
 </div>
 
-> [!TIP]
-> Check out the wandb for the latest runs:
+
+
+> [!IMPORTANT]
+> Visit the [Documentation](https://assettocorsarl.github.io/AssettoCorsaRL-DOCS/docs)
 
 ---
 <div id="user-content-toc">
@@ -29,9 +31,9 @@
 </div>
 
 
-1. Train a Soft Actor-Critic (SAC) agent on a simplified 2D environment: OpenAI’s CarRacing-v3.
-2. Adapt and port the trained agent to the Assetto Corsa racing simulator.
-3. Implement full race simulations using AI-driven race strategies.
+- [x] 1. Train a Soft Actor-Critic (SAC) agent on a simplified 2D environment: OpenAI’s CarRacing-v3.
+-  [ ] 2. Adapt and port the trained agent to the Assetto Corsa racing simulator.
+- [ ] 3. Implement full race simulations using AI-driven race strategies.
 
 ---
 
@@ -43,11 +45,13 @@
   </ul>
 </div>
 
-- `configs/env_config.yaml` — environment hyperparameters (observation size, frame stacking, num envs, etc.)
-- `configs/model_config.yaml` — model and training hyperparameters (learning rates, replay buffer size, etc.)
-`configs/model_config.yaml` — model and training hyperparameters (learning rates, replay buffer size, etc.)
+**For Car-Racing:**
 
-Training code merges values from both files and fills missing keys from `SACConfig` defaults.
+- `configs/car-racing/env_config.yaml` — environment hyperparameters (observation size, frame stacking, num envs, etc.)
+- `configs/car-racing/model_config.yaml` — model and training hyperparameters (learning rates, replay buffer size, etc.)
+`configs/car-racing/model_config.yaml` — model and training hyperparameters (learning rates, replay buffer size, etc.)
+
+
 
 ---
 <div id="user-content-toc">
@@ -70,6 +74,9 @@ Training code merges values from both files and fills missing keys from `SACConf
 </div>
 
 Checkpoints will generate in  `models/` (e.g., `sac_checkpoint_100000.pt`). Experiment logs and artifacts are stored in `wandb/` run directories.
+
+> [!CAUTION]
+> Make sure you run `wandb login` before running any training scripts to avoid any errors
 
 ---
 <div id="user-content-toc">
