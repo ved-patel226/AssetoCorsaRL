@@ -51,33 +51,6 @@
 - `configs/car-racing/model_config.yaml` — model and training hyperparameters (learning rates, replay buffer size, etc.)
 `configs/car-racing/model_config.yaml` — model and training hyperparameters (learning rates, replay buffer size, etc.)
 
-
-
----
-<div id="user-content-toc">
-  <ul align="center" style="list-style: none;">
-    <summary>
-        <h2>🛠️ Installation</h2>
-    </summary>
-  </ul>
-</div>
-
-- Coming soon.
-
----
-<div id="user-content-toc">
-  <ul align="center" style="list-style: none;">
-    <summary>
-        <h2>📁 Checkpoints & Experiments </h2>
-    </summary>
-  </ul>
-</div>
-
-Checkpoints will generate in  `models/` (e.g., `sac_checkpoint_100000.pt`). Experiment logs and artifacts are stored in `wandb/` run directories.
-
-> [!CAUTION]
-> Make sure you run `wandb login` before running any training scripts to avoid any errors
-
 ---
 <div id="user-content-toc">
   <ul align="center" style="list-style: none;">
