@@ -5,6 +5,7 @@ from typing import Optional, Dict, Any, Tuple
 import time
 import json
 from pathlib import Path
+import cv2
 
 from .ac_send_actions import XboxController
 from .ac_telemetry_helper import Telemetry
@@ -27,6 +28,8 @@ class AssettoCorsa(gym.Env):
         reward_per_m_advanced_along_centerline: float = 1.0,
         final_speed_reward_per_m_per_s: float = 0.1,
         ms_per_action: float = 20.0,
+        include_image: bool = False,
+        observation_image_shape: Tuple[int, int] = (84, 84),
     ):
         super().__init__()
 
@@ -55,15 +58,32 @@ class AssettoCorsa(gym.Env):
         )
 
         if observation_keys is None:
-            observation_keys = ["speed", "pos_x", "pos_y", "pos_z"]
+            observation_keys = []
         self.observation_keys = observation_keys
 
-        self.observation_space = spaces.Box(
+        self.include_image = include_image
+        self.observation_image_shape = observation_image_shape  # (H, W)
+
+        vector_space = spaces.Box(
             low=-np.inf,
             high=np.inf,
-            shape=(len(observation_keys),),
+            shape=(len(self.observation_keys),),
             dtype=np.float32,
         )
+
+        if self.include_image:
+            img_h, img_w = self.observation_image_shape
+            image_space = spaces.Box(
+                low=0,
+                high=255,
+                shape=(img_h, img_w, 1),
+                dtype=np.uint8,
+            )
+            self.observation_space = spaces.Dict(
+                {"vector": vector_space, "image": image_space}
+            )
+        else:
+            self.observation_space = vector_space
 
         self.controller = XboxController(use_dummy=use_dummy_controller)
         self.telemetry = Telemetry(
@@ -72,6 +92,7 @@ class AssettoCorsa(gym.Env):
             recv_port=recv_port,
             timeout=0.1,
             auto_start_receiver=True,
+            capture_images=self.include_image,
         )
 
         self._episode_step = 0
@@ -82,21 +103,43 @@ class AssettoCorsa(gym.Env):
         self._last_speed = 0.0
         self._current_racing_line_index = 0
 
-    def _get_observation(self) -> np.ndarray:
-        """Extract observation from telemetry data."""
+    def _get_observation(self):
+        """Extract observation from telemetry data and optional screenshot image.
+
+        Returns:
+            If `include_image` is True: dict with keys `vector` (np.ndarray float32) and `image` (uint8 HxWx1)
+            Otherwise: np.ndarray float32 vector
+        """
         data = self.telemetry.get_latest()
 
+        img = None
+        if self.include_image:
+            latest_img = self.telemetry.get_latest_image()
+            img_h, img_w = self.observation_image_shape
+            if latest_img is None:
+                img = np.zeros((img_h, img_w, 1), dtype=np.uint8)
+            else:
+                try:
+                    resized = cv2.resize(
+                        latest_img, (img_w, img_h), interpolation=cv2.INTER_LINEAR
+                    )
+                except Exception:
+                    resized = cv2.resize(latest_img, (img_w, img_h))
+                img = resized[..., np.newaxis].astype(np.uint8)
+
         if data is None:
-            return np.zeros(len(self.observation_keys), dtype=np.float32)
+            vector = np.zeros(len(self.observation_keys), dtype=np.float32)
+            self._last_obs = None
+        else:
+            self._last_obs = data
+            vector = np.array(
+                [float(data.get(key, 0.0)) for key in self.observation_keys],
+                dtype=np.float32,
+            )
 
-        self._last_obs = data
-
-        obs = []
-        for key in self.observation_keys:
-            value = data.get(key, 0.0)
-            obs.append(float(value))
-
-        return np.array(obs, dtype=np.float32)
+        if self.include_image:
+            return {"vector": vector, "image": img}
+        return vector
 
     def _load_racing_line(self, filepath: str) -> None:
         """Load racing line from JSON file."""

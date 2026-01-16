@@ -4,8 +4,9 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 import lightning as pl
-from typing import Tuple
+from typing import Tuple, Optional
 import lpips
+import math
 
 
 class ConvBlock(nn.Module):
@@ -54,14 +55,165 @@ class DeConvBlock(nn.Module):
         return self.act(self.bn(self.deconv(x)))
 
 
+# ============================================================================
+# Enhanced Building Blocks for Powerful VAE
+# ============================================================================
+
+
+class ResidualBlock(nn.Module):
+    """Residual block with GroupNorm for stable training."""
+
+    def __init__(
+        self,
+        channels: int,
+        groups: int = 8,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        self.norm1 = nn.GroupNorm(groups, channels)
+        self.conv1 = nn.Conv2d(channels, channels, 3, padding=1)
+        self.norm2 = nn.GroupNorm(groups, channels)
+        self.conv2 = nn.Conv2d(channels, channels, 3, padding=1)
+        self.dropout = nn.Dropout(dropout)
+        self.act = nn.SiLU()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        residual = x
+        x = self.act(self.norm1(x))
+        x = self.conv1(x)
+        x = self.act(self.norm2(x))
+        x = self.dropout(x)
+        x = self.conv2(x)
+        return x + residual
+
+
+class SelfAttention(nn.Module):
+    """Multi-head self-attention for capturing long-range dependencies."""
+
+    def __init__(self, channels: int, num_heads: int = 4):
+        super().__init__()
+        self.channels = channels
+        self.num_heads = num_heads
+        self.head_dim = channels // num_heads
+
+        self.norm = nn.GroupNorm(8, channels)
+        self.qkv = nn.Conv2d(channels, channels * 3, 1)
+        self.proj = nn.Conv2d(channels, channels, 1)
+        self.scale = self.head_dim**-0.5
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, C, H, W = x.shape
+        residual = x
+
+        x = self.norm(x)
+        qkv = self.qkv(x).reshape(B, 3, self.num_heads, self.head_dim, H * W)
+        q, k, v = qkv[:, 0], qkv[:, 1], qkv[:, 2]
+
+        # Attention: (B, heads, head_dim, HW) @ (B, heads, HW, head_dim) -> (B, heads, HW, HW)
+        q = q.permute(0, 1, 3, 2)  # (B, heads, HW, head_dim)
+        k = k.permute(0, 1, 2, 3)  # (B, heads, head_dim, HW)
+        v = v.permute(0, 1, 3, 2)  # (B, heads, HW, head_dim)
+
+        attn = torch.matmul(q, k) * self.scale  # (B, heads, HW, HW)
+        attn = F.softmax(attn, dim=-1)
+
+        out = torch.matmul(attn, v)  # (B, heads, HW, head_dim)
+        out = out.permute(0, 1, 3, 2).reshape(B, C, H, W)
+        out = self.proj(out)
+
+        return out + residual
+
+
+class DownBlock(nn.Module):
+    """Encoder block: downsample + residual blocks + optional attention."""
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        num_res_blocks: int = 2,
+        use_attention: bool = False,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        self.downsample = nn.Conv2d(in_channels, out_channels, 4, stride=2, padding=1)
+
+        self.res_blocks = nn.ModuleList()
+        self.attn_blocks = nn.ModuleList()
+
+        for _ in range(num_res_blocks):
+            self.res_blocks.append(ResidualBlock(out_channels, dropout=dropout))
+            if use_attention:
+                self.attn_blocks.append(SelfAttention(out_channels))
+            else:
+                self.attn_blocks.append(nn.Identity())
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.downsample(x)
+        for res, attn in zip(self.res_blocks, self.attn_blocks):
+            x = res(x)
+            x = attn(x)
+        return x
+
+
+class UpBlock(nn.Module):
+    """Decoder block: upsample + residual blocks + optional attention."""
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        num_res_blocks: int = 2,
+        use_attention: bool = False,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        self.upsample = nn.ConvTranspose2d(
+            in_channels, out_channels, 4, stride=2, padding=1
+        )
+
+        self.res_blocks = nn.ModuleList()
+        self.attn_blocks = nn.ModuleList()
+
+        for _ in range(num_res_blocks):
+            self.res_blocks.append(ResidualBlock(out_channels, dropout=dropout))
+            if use_attention:
+                self.attn_blocks.append(SelfAttention(out_channels))
+            else:
+                self.attn_blocks.append(nn.Identity())
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.upsample(x)
+        for res, attn in zip(self.res_blocks, self.attn_blocks):
+            x = res(x)
+            x = attn(x)
+        return x
+
+
+class MiddleBlock(nn.Module):
+    """Middle block with attention for bottleneck processing."""
+
+    def __init__(self, channels: int, dropout: float = 0.1):
+        super().__init__()
+        self.res1 = ResidualBlock(channels, dropout=dropout)
+        self.attn = SelfAttention(channels)
+        self.res2 = ResidualBlock(channels, dropout=dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.res1(x)
+        x = self.attn(x)
+        x = self.res2(x)
+        return x
+
+
 class ConvVAE(pl.LightningModule):
     """Convolutional VAE implemented as a PyTorch LightningModule.
 
-    - Inputs: RGB images of shape (B, 3, 64, 64)
+    - Inputs: RGB images of shape (B, C, H, W) where H, W are specified by im_shape
     - Latent: `z_dim`-dimensional Gaussian
     - Reconstruction: output sigmoid-ed RGB image in same shape as input
 
-    Main hyperparameters: `z_dim`, `lr`, `beta` (KL multiplier)
+    Main hyperparameters: `z_dim`, `lr`, `beta` (KL multiplier), `im_shape`
     """
 
     def __init__(
@@ -71,6 +223,14 @@ class ConvVAE(pl.LightningModule):
         beta: float = 1.0,
         in_channels: int = 3,
         warmup_steps: int = 500,
+        im_shape: Tuple[int, int] = (64, 64),
+        # New architecture parameters
+        base_channels: int = 32,
+        channel_multipliers: Tuple[int, ...] = (1, 2, 4),
+        num_res_blocks: int = 2,
+        attention_resolutions: Tuple[int, ...] = (10,),
+        dropout: float = 0.1,
+        mse_weight: float = 0.0,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -79,6 +239,9 @@ class ConvVAE(pl.LightningModule):
         self.beta = beta
         self.in_channels = in_channels
         self.warmup_steps = warmup_steps
+        self.im_shape = im_shape  # (H, W)
+        self.base_channels = base_channels
+        self.mse_weight = mse_weight
 
         # LPIPS perceptual loss (uses VGG by default)
         self.lpips = lpips.LPIPS(net="vgg")
@@ -86,32 +249,102 @@ class ConvVAE(pl.LightningModule):
         for param in self.lpips.parameters():
             param.requires_grad = False
 
-        # encoder
-        self.encoder = nn.Sequential(
-            nn.Conv2d(
-                self.in_channels, 32, kernel_size=4, stride=2, padding=1
-            ),  # 32x32x32
-            nn.LeakyReLU(0.2),
-            ConvBlock(32, 64, 4, stride=2, padding=1),  # 64x16x16
-            ConvBlock(64, 128, 4, stride=2, padding=1),  # 128x8x8
-            ConvBlock(128, 256, 4, stride=2, padding=1),  # 256x4x4
+        # Calculate channel sizes at each resolution
+        channels = [base_channels * m for m in channel_multipliers]
+
+        # Initial projection
+        self.encoder_in = nn.Conv2d(in_channels, base_channels, 3, padding=1)
+
+        # Build encoder
+        self.encoder_blocks = nn.ModuleList()
+        current_res = im_shape[0]
+        in_ch = base_channels
+
+        for i, out_ch in enumerate(channels):
+            use_attn = current_res in attention_resolutions
+            self.encoder_blocks.append(
+                DownBlock(
+                    in_ch,
+                    out_ch,
+                    num_res_blocks=num_res_blocks,
+                    use_attention=use_attn,
+                    dropout=dropout,
+                )
+            )
+            in_ch = out_ch
+            current_res //= 2
+
+        # Middle block
+        self.middle = MiddleBlock(channels[-1], dropout=dropout)
+
+        # Dynamically calculate the flattened size after encoder
+        with torch.no_grad():
+            dummy_input = torch.zeros(1, in_channels, im_shape[0], im_shape[1])
+            dummy_output = self._encode_features(dummy_input)
+            self.encoder_out_shape = dummy_output.shape[1:]  # (C, H, W) after encoder
+            self.flat_dim = dummy_output.view(1, -1).shape[1]
+
+        # Latent heads with reduced hidden layer to prevent param explosion
+        hidden_dim = min(
+            self.flat_dim, 256
+        )  # Much smaller to avoid 13M+ param FC layers
+        self.fc_pre_latent = nn.Sequential(
+            nn.Linear(self.flat_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Dropout(dropout),
+        )
+        self.fc_mu = nn.Linear(hidden_dim, z_dim)
+        self.fc_logvar = nn.Linear(hidden_dim, z_dim)
+
+        # Decoder projection
+        self.fc_dec = nn.Sequential(
+            nn.Linear(z_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, self.flat_dim),
         )
 
-        # latent heads
-        self.flat_dim = 256 * 4 * 4
-        self.fc_mu = nn.Linear(self.flat_dim, z_dim)
-        self.fc_logvar = nn.Linear(self.flat_dim, z_dim)
-        self.fc_dec = nn.Linear(z_dim, self.flat_dim)
+        # Build decoder (reverse of encoder)
+        self.decoder_blocks = nn.ModuleList()
+        reversed_channels = list(reversed(channels))
 
-        # decoder
-        # We start from (B, 256, 4, 4)
-        self.decoder = nn.Sequential(
-            DeConvBlock(256, 128, 4, stride=2, padding=1),  # 128x8x8
-            DeConvBlock(128, 64, 4, stride=2, padding=1),  # 64x16x16
-            DeConvBlock(64, 32, 4, stride=2, padding=1),  # 32x32x32
-            nn.ConvTranspose2d(32, 3, kernel_size=4, stride=2, padding=1),  # 3x64x64
+        for i in range(len(reversed_channels) - 1):
+            in_ch = reversed_channels[i]
+            out_ch = reversed_channels[i + 1]
+            current_res = im_shape[0] // (2 ** (len(channels) - i - 1))
+            use_attn = current_res in attention_resolutions
+            self.decoder_blocks.append(
+                UpBlock(
+                    in_ch,
+                    out_ch,
+                    num_res_blocks=num_res_blocks,
+                    use_attention=use_attn,
+                    dropout=dropout,
+                )
+            )
+
+        # Final upsampling and projection
+        self.decoder_out = nn.Sequential(
+            UpBlock(
+                reversed_channels[-1],
+                base_channels,
+                num_res_blocks=num_res_blocks,
+                use_attention=False,
+                dropout=dropout,
+            ),
+            nn.GroupNorm(8, base_channels),
+            nn.SiLU(),
+            nn.Conv2d(base_channels, 3, 3, padding=1),
             nn.Sigmoid(),
         )
+
+    def _encode_features(self, x: torch.Tensor) -> torch.Tensor:
+        """Extract features through encoder without computing latent params."""
+        x = self.encoder_in(x)
+        for block in self.encoder_blocks:
+            x = block(x)
+        x = self.middle(x)
+        return x
 
     def encode(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Return mu and logvar for input batch.
@@ -121,20 +354,35 @@ class ConvVAE(pl.LightningModule):
         """
         if x.dim() == 3:
             x = x.unsqueeze(0)
-        h = self.encoder(x)
+        h = self._encode_features(x)
         h = h.view(h.size(0), -1)
+        h = self.fc_pre_latent(h)
         mu = self.fc_mu(h)
         logvar = self.fc_logvar(h)
         return mu, logvar
 
     def reparameterize(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
+        # Clamp logvar to prevent exp overflow -> NaN
+        logvar = torch.clamp(logvar, min=-10, max=10)
         std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)
         return mu + eps * std
 
     def decode(self, z: torch.Tensor) -> torch.Tensor:
-        h = self.fc_dec(z).view(-1, 256, 4, 4)
-        return self.decoder(h)
+        h = self.fc_dec(z).view(-1, *self.encoder_out_shape)
+
+        # Pass through decoder blocks
+        for block in self.decoder_blocks:
+            h = block(h)
+
+        out = self.decoder_out(h)
+
+        # Resize to match original input shape if needed
+        if out.shape[2:] != self.im_shape:
+            out = F.interpolate(
+                out, size=self.im_shape, mode="bilinear", align_corners=False
+            )
+        return out
 
     def forward(
         self, x: torch.Tensor
@@ -159,8 +407,12 @@ class ConvVAE(pl.LightningModule):
         target_scaled = target * 2.0 - 1.0
         lpips_loss = self.lpips(recon_scaled, target_scaled).mean()
 
-        # Combined reconstruction loss: MSE + perceptual
-        recon_loss = lpips_loss
+        # Add MSE loss if weight > 0 to prevent collapse
+        if self.mse_weight > 0:
+            mse_loss = F.mse_loss(recon, target, reduction="mean")
+            recon_loss = lpips_loss + self.mse_weight * mse_loss
+        else:
+            recon_loss = lpips_loss
 
         # KL divergence between posterior and standard normal (per-sample average)
         kl = -0.5 * torch.mean(torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1))
@@ -173,10 +425,17 @@ class ConvVAE(pl.LightningModule):
         recon, mu, logvar = self.forward(x)
         target = x[:, -3:, :, :] if x.dim() == 4 and x.size(1) != recon.size(1) else x
 
-        # Only use LPIPS loss for reconstruction
+        # LPIPS + optional MSE
         recon_scaled = recon * 2.0 - 1.0
         target_scaled = target * 2.0 - 1.0
-        recon_loss = self.lpips(recon_scaled, target_scaled).mean()
+        lpips_loss = self.lpips(recon_scaled, target_scaled).mean()
+
+        if self.mse_weight > 0:
+            mse_loss = F.mse_loss(recon, target, reduction="mean")
+            recon_loss = lpips_loss + self.mse_weight * mse_loss
+            self.log("train/mse", mse_loss, on_step=False, on_epoch=True)
+        else:
+            recon_loss = lpips_loss
 
         # KL divergence
         kl = -0.5 * torch.mean(torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1))
@@ -184,7 +443,11 @@ class ConvVAE(pl.LightningModule):
 
         self.log("train/loss", loss, prog_bar=True, on_step=True, on_epoch=True)
         self.log("train/recon", recon_loss, on_step=False, on_epoch=True)
+        self.log("train/lpips", lpips_loss, on_step=False, on_epoch=True)
         self.log("train/kl", kl, on_step=False, on_epoch=True)
+        self.log("train/mu_mean", mu.mean(), on_step=False, on_epoch=True)
+        self.log("train/mu_std", mu.std(), on_step=False, on_epoch=True)
+        self.log("train/logvar_mean", logvar.mean(), on_step=False, on_epoch=True)
         self.log(
             "train/lr",
             self.optimizers().param_groups[0]["lr"],
@@ -253,3 +516,13 @@ class ConvVAE(pl.LightningModule):
             )
         except Exception as e:
             print(f"Failed to log images: {e}")
+
+
+def main() -> None:
+    vae = ConvVAE()
+    print(vae)
+    print(f"Total parameters: {sum(p.numel() for p in vae.parameters())}")
+
+
+if __name__ == "__main__":
+    main()

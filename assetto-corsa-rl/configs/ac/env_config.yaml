@@ -1,0 +1,3 @@
+environment:
+  num_envs: 1 # ac env doesn't support parallel envs
+  frames_per_batch: 1024
