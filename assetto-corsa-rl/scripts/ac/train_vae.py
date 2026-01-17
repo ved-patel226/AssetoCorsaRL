@@ -120,6 +120,12 @@ def parse_args():
     p.add_argument("--num-workers", type=int, default=4)
     p.add_argument("--gpus", type=int, default=1)
     p.add_argument("--ckpt-dir", type=str, default="checkpoints")
+    p.add_argument(
+        "--encoder-ckpt",
+        type=Path,
+        default=None,
+        help="Path to pretrained encoder checkpoint to load",
+    )
     p.add_argument("--wandb-project", type=str, default="assetto_corsa_rl_vae")
     p.add_argument("--wandb-entity", type=str, default=None)
     p.add_argument("--wandb-name", type=str, default=None)
@@ -182,7 +188,7 @@ def main():
     print(f"✓ Batch shape verified: {xb.shape}")
 
     model = ConvVAE(
-        z_dim=256,
+        z_dim=1024,
         lr=args.lr,
         beta=args.beta,
         in_channels=in_channels,
@@ -190,6 +196,33 @@ def main():
         im_shape=(img_h, img_w),
         mse_weight=args.mse_weight,
     )
+
+    # Load pretrained encoder if provided
+    if args.encoder_ckpt:
+        print(f"Loading encoder from {args.encoder_ckpt}...")
+        try:
+            ckpt = torch.load(str(args.encoder_ckpt), map_location="cpu")
+            # Try to load full state dict first
+            if isinstance(ckpt, dict) and "state_dict" in ckpt:
+                state_dict = ckpt["state_dict"]
+            else:
+                state_dict = ckpt
+
+            # Load only encoder weights (encoder_in, encoder_blocks, middle, to_latent)
+            encoder_keys = ["encoder_in", "encoder_blocks", "middle", "to_latent"]
+            encoder_state = {
+                k: v
+                for k, v in state_dict.items()
+                if any(k.startswith(prefix) for prefix in encoder_keys)
+            }
+
+            if encoder_state:
+                model.load_state_dict(encoder_state, strict=False)
+                print(f"✓ Loaded {len(encoder_state)} encoder parameters")
+            else:
+                print("Warning: No encoder parameters found in checkpoint")
+        except Exception as e:
+            print(f"Warning: Failed to load encoder checkpoint: {e}")
 
     ckpt_cb = ModelCheckpoint(
         dirpath=args.ckpt_dir,

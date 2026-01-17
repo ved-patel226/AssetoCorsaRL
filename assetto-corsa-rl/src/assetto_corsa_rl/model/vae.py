@@ -277,34 +277,16 @@ class ConvVAE(pl.LightningModule):
         # Middle block
         self.middle = MiddleBlock(channels[-1], dropout=dropout)
 
-        # Dynamically calculate the flattened size after encoder
         with torch.no_grad():
             dummy_input = torch.zeros(1, in_channels, im_shape[0], im_shape[1])
             dummy_output = self._encode_features(dummy_input)
             self.encoder_out_shape = dummy_output.shape[1:]  # (C, H, W) after encoder
-            self.flat_dim = dummy_output.view(1, -1).shape[1]
+            C_enc, H_enc, W_enc = self.encoder_out_shape
 
-        # Latent heads with reduced hidden layer to prevent param explosion
-        hidden_dim = min(
-            self.flat_dim, 256
-        )  # Much smaller to avoid 13M+ param FC layers
-        self.fc_pre_latent = nn.Sequential(
-            nn.Linear(self.flat_dim, hidden_dim),
-            nn.SiLU(),
-            nn.Dropout(dropout),
-        )
-        self.fc_mu = nn.Linear(hidden_dim, z_dim)
-        self.fc_logvar = nn.Linear(hidden_dim, z_dim)
+        latent_channels = z_dim
+        self.to_latent = nn.Conv2d(C_enc, latent_channels, kernel_size=1)
+        self.from_latent = nn.Conv2d(latent_channels, C_enc, kernel_size=1)
 
-        # Decoder projection
-        self.fc_dec = nn.Sequential(
-            nn.Linear(z_dim, hidden_dim),
-            nn.SiLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, self.flat_dim),
-        )
-
-        # Build decoder (reverse of encoder)
         self.decoder_blocks = nn.ModuleList()
         reversed_channels = list(reversed(channels))
 
@@ -323,7 +305,6 @@ class ConvVAE(pl.LightningModule):
                 )
             )
 
-        # Final upsampling and projection
         self.decoder_out = nn.Sequential(
             UpBlock(
                 reversed_channels[-1],
@@ -338,6 +319,10 @@ class ConvVAE(pl.LightningModule):
             nn.Sigmoid(),
         )
 
+        self.final_resize = nn.Upsample(
+            size=im_shape, mode="bilinear", align_corners=False
+        )
+
     def _encode_features(self, x: torch.Tensor) -> torch.Tensor:
         """Extract features through encoder without computing latent params."""
         x = self.encoder_in(x)
@@ -346,108 +331,62 @@ class ConvVAE(pl.LightningModule):
         x = self.middle(x)
         return x
 
-    def encode(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Return mu and logvar for input batch.
-
-        Accepts either (B, C, H, W) or single-sample (C, H, W); single samples will
-        be expanded to a batch of size 1.
-        """
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        """Encode input to latent representation."""
         if x.dim() == 3:
             x = x.unsqueeze(0)
         h = self._encode_features(x)
-        h = h.view(h.size(0), -1)
-        h = self.fc_pre_latent(h)
-        mu = self.fc_mu(h)
-        logvar = self.fc_logvar(h)
-        return mu, logvar
-
-    def reparameterize(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
-        # Clamp logvar to prevent exp overflow -> NaN
-        logvar = torch.clamp(logvar, min=-10, max=10)
-        std = torch.exp(0.5 * logvar)
-        eps = torch.randn_like(std)
-        return mu + eps * std
+        z = self.to_latent(h)
+        return z
 
     def decode(self, z: torch.Tensor) -> torch.Tensor:
-        h = self.fc_dec(z).view(-1, *self.encoder_out_shape)
+        h = self.from_latent(z)
 
-        # Pass through decoder blocks
         for block in self.decoder_blocks:
             h = block(h)
 
         out = self.decoder_out(h)
 
-        # Resize to match original input shape if needed
-        if out.shape[2:] != self.im_shape:
-            out = F.interpolate(
-                out, size=self.im_shape, mode="bilinear", align_corners=False
-            )
+        out = self.final_resize(out)
         return out
 
-    def forward(
-        self, x: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Returns (reconstruction, mu, logvar)."""
-        mu, logvar = self.encode(x)
-        z = self.reparameterize(mu, logvar)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Returns reconstruction."""
+        z = self.encode(x)
         recon = self.decode(z)
-        return recon, mu, logvar
+        return recon
 
-    def _loss(
-        self,
-        recon: torch.Tensor,
-        target: torch.Tensor,
-        mu: torch.Tensor,
-        logvar: torch.Tensor,
-    ) -> torch.Tensor:
-        batch_size = target.size(0)
-
+    def _loss(self, recon: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         # Scale from [0, 1] to [-1, 1]
         recon_scaled = recon * 2.0 - 1.0
         target_scaled = target * 2.0 - 1.0
         lpips_loss = self.lpips(recon_scaled, target_scaled).mean()
 
-        # Add MSE loss if weight > 0 to prevent collapse
+        # Add MSE loss if weight > 0
         if self.mse_weight > 0:
             mse_loss = F.mse_loss(recon, target, reduction="mean")
-            recon_loss = lpips_loss + self.mse_weight * mse_loss
+            loss = lpips_loss + self.mse_weight * mse_loss
         else:
-            recon_loss = lpips_loss
+            loss = lpips_loss
 
-        # KL divergence between posterior and standard normal (per-sample average)
-        kl = -0.5 * torch.mean(torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1))
-
-        loss = recon_loss + self.beta * kl
-        return loss, recon_loss, kl
+        return loss
 
     def training_step(self, batch, batch_idx):
         x = batch[0] if isinstance(batch, (list, tuple)) else batch
-        recon, mu, logvar = self.forward(x)
+        recon = self.forward(x)
         target = x[:, -3:, :, :] if x.dim() == 4 and x.size(1) != recon.size(1) else x
 
-        # LPIPS + optional MSE
-        recon_scaled = recon * 2.0 - 1.0
-        target_scaled = target * 2.0 - 1.0
-        lpips_loss = self.lpips(recon_scaled, target_scaled).mean()
+        loss = self._loss(recon, target)
 
-        if self.mse_weight > 0:
-            mse_loss = F.mse_loss(recon, target, reduction="mean")
-            recon_loss = lpips_loss + self.mse_weight * mse_loss
-            self.log("train/mse", mse_loss, on_step=False, on_epoch=True)
-        else:
-            recon_loss = lpips_loss
-
-        # KL divergence
-        kl = -0.5 * torch.mean(torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1))
-        loss = recon_loss + self.beta * kl
-
-        self.log("train/loss", loss, prog_bar=True, on_step=True, on_epoch=True)
-        self.log("train/recon", recon_loss, on_step=False, on_epoch=True)
-        self.log("train/lpips", lpips_loss, on_step=False, on_epoch=True)
-        self.log("train/kl", kl, on_step=False, on_epoch=True)
-        self.log("train/mu_mean", mu.mean(), on_step=False, on_epoch=True)
-        self.log("train/mu_std", mu.std(), on_step=False, on_epoch=True)
-        self.log("train/logvar_mean", logvar.mean(), on_step=False, on_epoch=True)
+        # Log loss and lr consistently every step
+        self.log(
+            "train/loss",
+            loss,
+            prog_bar=True,
+            on_step=True,
+            on_epoch=True,
+            sync_dist=True,
+        )
         self.log(
             "train/lr",
             self.optimizers().param_groups[0]["lr"],
@@ -455,6 +394,18 @@ class ConvVAE(pl.LightningModule):
             on_step=True,
         )
 
+        # Log detailed metrics every step (but aggregate for epoch)
+        if self.mse_weight > 0:
+            recon_scaled = recon * 2.0 - 1.0
+            target_scaled = target * 2.0 - 1.0
+            lpips_loss = self.lpips(recon_scaled, target_scaled).mean()
+            mse_loss = F.mse_loss(recon, target, reduction="mean")
+            self.log(
+                "train/lpips", lpips_loss, on_step=True, on_epoch=True, sync_dist=True
+            )
+            self.log("train/mse", mse_loss, on_step=True, on_epoch=True, sync_dist=True)
+
+        # Log images every 500 steps
         if self.global_step > 0 and self.global_step % 500 == 0:
             self.log_images(target, recon)
 
@@ -462,14 +413,11 @@ class ConvVAE(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         x = batch[0] if isinstance(batch, (list, tuple)) else batch
-        recon, mu, logvar = self.forward(x)
+        recon = self.forward(x)
         target = x[:, -3:, :, :] if x.dim() == 4 and x.size(1) != recon.size(1) else x
-        loss, recon_loss, kl = self._loss(recon, target, mu, logvar)
+        loss = self._loss(recon, target)
 
-        # Log metrics
         self.log("val/loss", loss, prog_bar=True, sync_dist=True)
-        self.log("val/recon", recon_loss, sync_dist=True)
-        self.log("val/kl", kl, sync_dist=True)
         return loss
 
     def configure_optimizers(self):
@@ -493,7 +441,9 @@ class ConvVAE(pl.LightningModule):
     @torch.no_grad()
     def sample(self, num_samples: int = 1) -> torch.Tensor:
         """Sample from the prior and decode to image space."""
-        z = torch.randn(num_samples, self.z_dim, device=self.device)
+        # Sample latent with spatial dimensions matching encoder output
+        _, H_enc, W_enc = self.encoder_out_shape
+        z = torch.randn(num_samples, self.z_dim, H_enc, W_enc, device=self.device)
         return self.decode(z)
 
     def log_images(self, x: torch.Tensor, recon: torch.Tensor):
@@ -519,9 +469,15 @@ class ConvVAE(pl.LightningModule):
 
 
 def main() -> None:
-    vae = ConvVAE()
-    print(vae)
-    print(f"Total parameters: {sum(p.numel() for p in vae.parameters())}")
+    from torchinfo import summary
+
+    vae = ConvVAE(z_dim=128, im_shape=(84, 84))
+
+    summary(
+        vae,
+        input_size=(1, 3, 84, 84),
+        col_names=["input_size", "output_size", "num_params"],
+    )
 
 
 if __name__ == "__main__":

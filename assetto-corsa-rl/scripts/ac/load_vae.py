@@ -1,7 +1,7 @@
 """Load a trained VAE and inspect encoder/decoder outputs on environment frames.
 
 Example:
-    python assetto-corsa-rl/scripts/ac/load_vae.py --ckpt checkpoints/vae-final.pth
+    python assetto-corsa-rl/scripts/ac/load_vae.py --ckpt loss=0.1031.ckpt
 """
 
 from __future__ import annotations
@@ -84,25 +84,46 @@ def graystack_to_rgb_input(pixels: torch.Tensor, frames: int):
     return x
 
 
-def _recon_display(recon_rgb: torch.Tensor, title: str = "VAE") -> int:
-    """Display only the decoder output (reconstruction) in a popout window. Returns pressed key code."""
-    # recon_rgb expected (C,H,W) or (1,C,H,W)
-    if recon_rgb.dim() == 4:
-        img_t = recon_rgb[0]
+def _recon_display(
+    original: torch.Tensor, recon_rgb: torch.Tensor, title: str = "VAE Comparison"
+) -> int:
+    """Display original and reconstruction side-by-side in a popout window. Returns pressed key code."""
+    # Process original
+    if original.dim() == 4:
+        orig_t = original[0]
     else:
-        img_t = recon_rgb
-    # ensure first 3 channels if more
-    if img_t.size(0) > 3:
-        img_t = img_t[-3:]
-    # move to cpu and to numpy H,W,C scaled 0..255
-    arr = (img_t.detach().cpu().numpy() * 255.0).astype(np.uint8)
-    arr = np.transpose(arr, (1, 2, 0))  # H,W,C
-    if arr.shape[2] == 1:
-        arr = np.repeat(arr, 3, axis=2)
-    # convert RGB->BGR for cv2
-    arr = arr[..., ::-1]
+        orig_t = original
+    # Take last 3 channels (most recent frame RGB)
+    if orig_t.size(0) > 3:
+        orig_t = orig_t[-3:]
+    elif orig_t.size(0) == 1:
+        orig_t = orig_t.repeat(3, 1, 1)
 
-    cv2.imshow(title, arr)
+    # Process reconstruction
+    if recon_rgb.dim() == 4:
+        recon_t = recon_rgb[0]
+    else:
+        recon_t = recon_rgb
+    if recon_t.size(0) > 3:
+        recon_t = recon_t[-3:]
+
+    # Convert to numpy H,W,C scaled 0..255
+    orig_arr = (orig_t.detach().cpu().numpy() * 255.0).astype(np.uint8)
+    orig_arr = np.transpose(orig_arr, (1, 2, 0))  # H,W,C
+
+    recon_arr = (recon_t.detach().cpu().numpy() * 255.0).astype(np.uint8)
+    recon_arr = np.transpose(recon_arr, (1, 2, 0))  # H,W,C
+
+    # Concatenate side-by-side
+    combined = np.hstack([orig_arr, recon_arr])
+
+    # Convert RGB->BGR for cv2
+    combined = combined[..., ::-1]
+
+    # Show with larger size
+    cv2.namedWindow(title, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(title, combined.shape[1] * 4, combined.shape[0] * 4)
+    cv2.imshow(title, combined)
     key = cv2.waitKey(1) & 0xFF
     return key
 
@@ -114,9 +135,12 @@ def main():
         args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu")
     )
 
-    # instantiate model matching training defaults
-    in_channels = 3 * args.frames
-    vae = ConvVAE(in_channels=in_channels, im_shape=(img_h, img_w))
+    vae = ConvVAE(
+        z_dim=1024,
+        in_channels=3,
+        warmup_steps=500,
+        im_shape=(img_h, img_w),
+    )
     ckpt = torch.load(str(args.ckpt), map_location="cpu")
     try:
         vae.load_state_dict(ckpt)
@@ -136,18 +160,16 @@ def main():
         td = env.reset()
 
         try:
-            cv2.namedWindow("VAE", cv2.WINDOW_NORMAL)
             while True:
                 pixels = td["pixels"]  # shape (B, C, H, W) or (C, H, W)
                 pixels_sample = pixels[0] if pixels.dim() == 4 else pixels
 
                 x = graystack_to_rgb_input(pixels_sample.cpu(), args.frames).to(device)
                 with torch.no_grad():
-                    recon, _, _ = vae(x)
+                    recon = vae(x)
 
-                # show only decoder output
-                recon_img = recon[0, :3, :, :] if recon.size(1) >= 3 else recon[0]
-                key = _recon_display(recon_img, title="VAE")
+                # show original vs reconstruction
+                key = _recon_display(x, recon)
                 if key in (ord("q"), 27):
                     break
 
@@ -178,16 +200,14 @@ def main():
             frame_buf.append(fr.clone())
 
         try:
-            cv2.namedWindow("VAE", cv2.WINDOW_NORMAL)
             while True:
                 stacked = torch.stack(list(frame_buf), dim=0)
                 x = graystack_to_rgb_input(stacked, args.frames).to(device)
 
                 with torch.no_grad():
-                    recon, _, _ = vae(x)
+                    recon = vae(x)
 
-                recon_img = recon[0, :3, :, :] if recon.size(1) >= 3 else recon[0]
-                key = _recon_display(recon_img, title="VAE")
+                key = _recon_display(x, recon)
                 if key in (ord("q"), 27):
                     break
 

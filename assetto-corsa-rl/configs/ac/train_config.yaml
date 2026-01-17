@@ -8,6 +8,7 @@ train:
 
   # pretrained_model: "sac_checkpoint_9904128.pt"
   vae_checkpoint_path: null
+  encoder_checkpoint_path: "loss=0.1031.ckpt" #* IMPORTANT: Path to pretrained encoder to load for VAE training
 
   wandb:
     enabled: true
